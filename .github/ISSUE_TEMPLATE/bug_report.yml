@@ -1,0 +1,70 @@
+name: Bug report
+description: Report a reproducible rutomq defect
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for the report. Remove credentials, tokens, topic data, and private endpoints before submitting.
+        Security vulnerabilities must use the private reporting link instead of this public form.
+  - type: input
+    id: version
+    attributes:
+      label: rutomq version
+      description: Release tag or commit SHA
+      placeholder: v0.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment
+      options:
+        - Docker Compose
+        - Kubernetes / Helm
+        - Local binary
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: client
+    attributes:
+      label: Kafka client
+      description: Library, runtime, connector, and version
+      placeholder: Flink 2.2.1 / flink-connector-kafka 5.0.0-2.2
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Include topic settings, client settings, commands, and ordering.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs and metrics
+      description: Redact credentials and private data.
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I checked the compatibility matrix and this behavior is inside the advertised envelope.
+          required: true
+        - label: I removed credentials and private data.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true

@@ -1,0 +1,46 @@
+name: Feature or compatibility request
+description: Propose a Kafka behavior, operational feature, or integration
+title: "[Proposal]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: use_case
+    attributes:
+      label: Use case
+      description: Describe the user or operator outcome, not only an implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: kafka_contract
+    attributes:
+      label: Kafka contract
+      description: List relevant APIs, versions, KIPs, clients, and reference behavior.
+      placeholder: Produce v13, KIP-..., Kafka Java 4.3
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Explain expected success, error, fencing, authorization, and retry semantics.
+    validations:
+      required: true
+  - type: textarea
+    id: durability
+    attributes:
+      label: Stateless durability impact
+      description: Explain PostgreSQL, object storage, upgrade, retention, and Agent-replacement implications.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I reviewed the current compatibility matrix.
+          required: true
+        - label: The proposal does not require an Agent-local WAL or persistent volume.
+          required: true

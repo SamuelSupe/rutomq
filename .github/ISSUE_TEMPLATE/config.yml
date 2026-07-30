@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and design discussions
+    url: https://github.com/SamuelSupe/rutomq/discussions
+    about: Ask usage questions or discuss an idea before writing a formal proposal.
+  - name: Private vulnerability report
+    url: https://github.com/SamuelSupe/rutomq/security/advisories/new
+    about: Report suspected security vulnerabilities privately.

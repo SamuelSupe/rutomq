@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">rutomq mark</title>
+  <desc id="desc">A gradient letter R on a dark rounded square.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0a2330"/>
+      <stop offset="1" stop-color="#121a39"/>
+    </linearGradient>
+    <linearGradient id="brand" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#48e6d2"/>
+      <stop offset="1" stop-color="#7788ff"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="58" fill="url(#background)" stroke="#5cf2de" stroke-opacity=".55" stroke-width="5"/>
+  <path d="M55 62h88c39 0 63 22 63 55 0 25-14 44-38 51l41 58h-54l-36-52H101v52H55V62Zm46 37v38h40c15 0 24-7 24-20 0-12-9-18-24-18h-40Z" fill="url(#brand)"/>
+  <circle cx="204" cy="48" r="15" fill="#7e8cff"/>
+</svg>

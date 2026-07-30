@@ -4,3 +4,4 @@ description: Stateless, S3-backed Kafka-compatible message queue
 type: application
 version: 0.1.0
 appVersion: 0.1.0
+icon: https://raw.githubusercontent.com/SamuelSupe/rutomq/main/docs/assets/rutomq-mark.svg

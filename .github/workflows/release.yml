@@ -1,0 +1,85 @@
+name: Release assets
+
+on:
+  release:
+    types:
+      - published
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  package:
+    name: Linux x86-64 and Helm
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.88.0 --profile minimal
+
+      - name: Cache Cargo
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: release-${{ runner.os }}-1.88-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            release-${{ runner.os }}-1.88-
+            cargo-${{ runner.os }}-1.88-
+
+      - name: Verify release versions
+        run: |
+          set -euo pipefail
+          package_version="$(
+            cargo metadata --no-deps --format-version 1 |
+              jq -r '.packages[] | select(.name == "rutomq") | .version'
+          )"
+          chart_version="$(awk '$1 == "version:" { print $2 }' deploy/helm/rutomq/Chart.yaml)"
+          chart_app_version="$(awk '$1 == "appVersion:" { print $2 }' deploy/helm/rutomq/Chart.yaml)"
+          test "${RELEASE_TAG}" = "v${package_version}"
+          test "${package_version}" = "${chart_version}"
+          test "${package_version}" = "${chart_app_version}"
+
+      - name: Build binary
+        run: cargo build --release --locked --bin rutomq
+
+      - name: Package release assets
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          bundle="rutomq-${version}-linux-x86_64"
+          mkdir -p "dist/${bundle}"
+          install -m 0755 target/release/rutomq "dist/${bundle}/rutomq"
+          install -m 0644 README.md LICENSE "dist/${bundle}/"
+          tar -C dist -czf "dist/${bundle}.tar.gz" "${bundle}"
+          rm -rf "dist/${bundle}"
+          helm package deploy/helm/rutomq --destination dist
+          (
+            cd dist
+            sha256sum ./*.tar.gz ./*.tgz > SHA256SUMS
+          )
+
+      - name: Attest packaged artifacts
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.tgz
+
+      - name: Upload release assets
+        run: gh release upload "${RELEASE_TAG}" dist/* --clobber --repo "${GITHUB_REPOSITORY}"

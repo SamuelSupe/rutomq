@@ -1,0 +1,23 @@
+changelog:
+  exclude:
+    labels:
+      - skip-changelog
+  categories:
+    - title: Kafka compatibility
+      labels:
+        - kafka
+        - compatibility
+    - title: Storage and durability
+      labels:
+        - storage
+        - durability
+    - title: Operations and deployment
+      labels:
+        - operations
+        - kubernetes
+    - title: Security
+      labels:
+        - security
+    - title: Other changes
+      labels:
+        - "*"

@@ -1,0 +1,96 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-labelledby="title desc">
+  <title id="title">rutomq</title>
+  <desc id="desc">Kafka protocol messaging with stateless Rust agents, PostgreSQL metadata, and S3-compatible object storage.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#07111f"/>
+      <stop offset="0.55" stop-color="#0b1930"/>
+      <stop offset="1" stop-color="#10172c"/>
+    </linearGradient>
+    <linearGradient id="brand" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#48e6d2"/>
+      <stop offset="1" stop-color="#7788ff"/>
+    </linearGradient>
+    <radialGradient id="glowA">
+      <stop offset="0" stop-color="#36d9c4" stop-opacity=".28"/>
+      <stop offset="1" stop-color="#36d9c4" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowB">
+      <stop offset="0" stop-color="#7c6cff" stop-opacity=".24"/>
+      <stop offset="1" stop-color="#7c6cff" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M40 0H0V40" fill="none" stroke="#9bb0d0" stroke-opacity=".055"/>
+    </pattern>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="12" stdDeviation="18" flood-color="#000" flood-opacity=".32"/>
+    </filter>
+  </defs>
+
+  <rect width="1280" height="640" rx="32" fill="url(#bg)"/>
+  <rect width="1280" height="640" rx="32" fill="url(#grid)"/>
+  <circle cx="180" cy="110" r="310" fill="url(#glowA)"/>
+  <circle cx="1100" cy="540" r="390" fill="url(#glowB)"/>
+
+  <g transform="translate(86 92)" filter="url(#shadow)">
+    <rect width="112" height="112" rx="28" fill="#101f36" stroke="#5cf2de" stroke-opacity=".52"/>
+    <path d="M28 34h42c18 0 29 10 29 25 0 11-6 20-17 23l19 27H76L59 85H49v24H28V34Zm21 17v17h19c7 0 11-3 11-9 0-5-4-8-11-8H49Z" fill="url(#brand)"/>
+    <circle cx="94" cy="22" r="7" fill="#7e8cff"/>
+  </g>
+
+  <text x="86" y="292" fill="#f5f8ff" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="92" font-weight="750" letter-spacing="-4">rutomq</text>
+  <rect x="88" y="315" width="184" height="7" rx="3.5" fill="url(#brand)"/>
+  <text x="88" y="374" fill="#b8c8df" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="27" font-weight="450">Kafka protocol. Object storage durability.</text>
+  <text x="88" y="412" fill="#b8c8df" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="27" font-weight="450">Zero Agent-local WAL.</text>
+
+  <g font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="17" font-weight="650">
+    <g transform="translate(88 472)">
+      <rect width="112" height="40" rx="20" fill="#122940" stroke="#49dfcc" stroke-opacity=".42"/>
+      <text x="56" y="26" text-anchor="middle" fill="#86f3e5">RUST 1.88</text>
+    </g>
+    <g transform="translate(212 472)">
+      <rect width="142" height="40" rx="20" fill="#182541" stroke="#7487ff" stroke-opacity=".45"/>
+      <text x="71" y="26" text-anchor="middle" fill="#acb5ff">KAFKA 4.3</text>
+    </g>
+    <g transform="translate(366 472)">
+      <rect width="166" height="40" rx="20" fill="#122940" stroke="#49dfcc" stroke-opacity=".42"/>
+      <text x="83" y="26" text-anchor="middle" fill="#86f3e5">OPENDAL + S3</text>
+    </g>
+  </g>
+
+  <g transform="translate(675 118)" filter="url(#shadow)">
+    <path d="M128 84H250M337 84h98M250 84l-14-10m14 10-14 10M435 84l-14-10m14 10-14 10" stroke="url(#brand)" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+    <path d="M337 112c52 0 39 121 98 121M435 233l-14-10m14 10-14 10" stroke="#7385ff" stroke-opacity=".72" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+
+    <g>
+      <rect x="0" y="28" width="128" height="112" rx="24" fill="#10243a" stroke="#4be2d0" stroke-opacity=".55"/>
+      <path d="M31 62h66M31 84h50M31 106h59" stroke="#6cebdc" stroke-width="8" stroke-linecap="round"/>
+      <text x="64" y="166" text-anchor="middle" fill="#aebfd8" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="17">Kafka clients</text>
+    </g>
+
+    <g>
+      <rect x="250" y="0" width="87" height="168" rx="26" fill="#14223e" stroke="#7c8cff" stroke-opacity=".62"/>
+      <circle cx="293.5" cy="47" r="15" fill="#7186ff" fill-opacity=".82"/>
+      <rect x="273" y="78" width="41" height="8" rx="4" fill="#7b8eff"/>
+      <rect x="273" y="99" width="41" height="8" rx="4" fill="#4ce0ce"/>
+      <rect x="273" y="120" width="28" height="8" rx="4" fill="#7b8eff"/>
+      <text x="293.5" y="195" text-anchor="middle" fill="#aebfd8" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="17">Agents</text>
+    </g>
+
+    <g>
+      <path d="M435 28h142l24 26v87H435Z" fill="#10283c" stroke="#4be2d0" stroke-opacity=".58"/>
+      <path d="M577 28v28h24" fill="none" stroke="#4be2d0" stroke-opacity=".58"/>
+      <path d="M466 75h103M466 98h82M466 121h92" stroke="#60e7d8" stroke-width="7" stroke-linecap="round" stroke-opacity=".8"/>
+      <text x="518" y="168" text-anchor="middle" fill="#aebfd8" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="17">Immutable objects</text>
+    </g>
+
+    <g transform="translate(435 190)">
+      <ellipse cx="74" cy="20" rx="74" ry="20" fill="#24325b" stroke="#8190ff" stroke-opacity=".7"/>
+      <path d="M0 20v72c0 11 33 20 74 20s74-9 74-20V20" fill="#18294a" stroke="#8190ff" stroke-opacity=".7"/>
+      <path d="M0 54c0 11 33 20 74 20s74-9 74-20" fill="none" stroke="#8190ff" stroke-opacity=".5"/>
+      <text x="74" y="139" text-anchor="middle" fill="#aebfd8" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="17">PostgreSQL index</text>
+    </g>
+  </g>
+
+  <text x="1192" y="594" text-anchor="end" fill="#71839d" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="16">STATELESS · DURABLE · KAFKA-COMPATIBLE</text>
+</svg>
