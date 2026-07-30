@@ -7,6 +7,9 @@ use std::sync::Arc;
 use tokio::sync::Barrier;
 use uuid::Uuid;
 
+// A fixed historical cutoff keeps parallel tests from claiming freshly staged objects.
+const AGED_INTENT_CUTOFF_MS: i64 = 978_307_200_000;
+
 #[tokio::test]
 async fn postgres_upload_intents_serialize_commit_and_orphan_claim() {
     let Ok(database_url) = std::env::var("RUTOMQ_TEST_PG_URL") else {
@@ -42,7 +45,7 @@ async fn postgres_upload_intents_serialize_commit_and_orphan_claim() {
     store.stage_object(expired.clone()).await.unwrap();
     age_intent(&pool, &expired.key).await;
     let claimed = store
-        .claim_stale_objects(chrono::Utc::now().timestamp_millis(), 1_000)
+        .claim_stale_objects(AGED_INTENT_CUTOFF_MS, 1_000)
         .await
         .unwrap();
     assert!(claimed.contains(&expired.key));
@@ -86,7 +89,7 @@ async fn postgres_upload_intents_serialize_commit_and_orphan_claim() {
     let claim = tokio::spawn(async move {
         claim_barrier.wait().await;
         claim_store
-            .claim_stale_objects(chrono::Utc::now().timestamp_millis(), 1_000)
+            .claim_stale_objects(AGED_INTENT_CUTOFF_MS, 1_000)
             .await
     });
     let committed = commit.await.unwrap().is_ok();
@@ -153,7 +156,7 @@ async fn postgres_keeps_duplicate_produce_upload_visible_to_orphan_gc() {
 
     age_intent(&pool, &retry.key).await;
     let claimed = store
-        .claim_stale_objects(chrono::Utc::now().timestamp_millis(), 1_000)
+        .claim_stale_objects(AGED_INTENT_CUTOFF_MS, 1_000)
         .await
         .unwrap();
     assert!(claimed.contains(&retry.key));
