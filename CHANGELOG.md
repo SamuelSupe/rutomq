@@ -28,6 +28,11 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Prometheus metrics, health probes, graceful shutdown, and multi-Agent failure
   acceptance.
 
+### Fixed
+
+- Classic group rebalance deadlines are evaluated by PostgreSQL, avoiding
+  premature generations when Agent and database clocks differ.
+
 ### Known boundaries
 
 - `0.1.0` is a public preview, not a claim of complete Apache Kafka semantic

@@ -4,7 +4,6 @@ use crate::postgres_classic_group_store::{
     load_members, reject_consumer_protocol_group, validate_identity, validate_join,
 };
 use crate::{ControlError, GroupMember, JoinGroupResult};
-use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
@@ -18,8 +17,8 @@ struct GroupRow {
     leader_id: Option<String>,
     rebalance_id: Option<Uuid>,
     rebalance_pending: bool,
-    rebalance_deadline: Option<DateTime<Utc>>,
-    initial_rebalance_deadline: Option<DateTime<Utc>>,
+    rebalance_timed_out: bool,
+    initial_rebalance_elapsed: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -311,8 +310,12 @@ async fn load_group(
     Ok(sqlx::query(
         "SELECT generation_id, protocol_type, protocol_name, leader_id,
                 classic_rebalance_id, classic_rebalance_pending,
-                classic_rebalance_deadline,
-                classic_initial_rebalance_deadline
+                classic_rebalance_deadline IS NOT NULL
+                    AND classic_rebalance_deadline <= clock_timestamp()
+                    AS rebalance_timed_out,
+                classic_initial_rebalance_deadline IS NULL
+                    OR classic_initial_rebalance_deadline <= clock_timestamp()
+                    AS initial_rebalance_elapsed
          FROM consumer_groups WHERE group_id = $1 FOR UPDATE",
     )
     .bind(group_id)
@@ -325,8 +328,8 @@ async fn load_group(
         leader_id: row.get("leader_id"),
         rebalance_id: row.get("classic_rebalance_id"),
         rebalance_pending: row.get("classic_rebalance_pending"),
-        rebalance_deadline: row.get("classic_rebalance_deadline"),
-        initial_rebalance_deadline: row.get("classic_initial_rebalance_deadline"),
+        rebalance_timed_out: row.get("rebalance_timed_out"),
+        initial_rebalance_elapsed: row.get("initial_rebalance_elapsed"),
     }))
 }
 
@@ -607,13 +610,10 @@ async fn finish_if_ready(
     .fetch_one(&mut **transaction)
     .await?
     .get::<bool, _>("all_joined");
-    let now = Utc::now();
-    let initial_elapsed = group
-        .initial_rebalance_deadline
-        .is_none_or(|deadline| deadline <= now);
-    let timed_out = group
-        .rebalance_deadline
-        .is_some_and(|deadline| deadline <= now);
+    // PostgreSQL creates the deadlines, so it must also evaluate them. Comparing
+    // against an Agent clock can complete a generation early when hosts drift.
+    let initial_elapsed = group.initial_rebalance_elapsed;
+    let timed_out = group.rebalance_timed_out;
     if !(timed_out || (all_joined && initial_elapsed)) {
         return Ok(group);
     }
