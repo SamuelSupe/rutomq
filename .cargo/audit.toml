@@ -1,0 +1,4 @@
+[advisories]
+# SQLx records the disabled MySQL backend in Cargo.lock. The rsa crate is not
+# reachable from rutomq's PostgreSQL-only feature graph, including all targets.
+ignore = ["RUSTSEC-2023-0071"]

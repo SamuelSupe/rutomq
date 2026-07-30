@@ -12,7 +12,7 @@ The data plane is stateless: acknowledged records are persisted to an S3-compati
 The current Kafka wire coverage is recorded in
 [`compatibility.md`](compatibility.md). The dated validation result
 for the current checkpoint is
-[`compatibility-result-2026-07-29.md`](compatibility-result-2026-07-29.md).
+[`compatibility-result-2026-07-30.md`](compatibility-result-2026-07-30.md).
 Produce is acknowledged only after the OpenDAL object write and the PostgreSQL
 metadata transaction both succeed. A bounded in-memory batch uses a 250 ms window or 8 MiB limit;
 topic `flush.messages` and `flush.ms` can only shorten that window for the

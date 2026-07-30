@@ -98,7 +98,7 @@ command is for the disposable development stack only.
 ## Next steps
 
 - Read the [architecture and consistency model](architecture.md).
-- Review the [compatibility result](compatibility-result-2026-07-29.md).
+- Review the [compatibility result](compatibility-result-2026-07-30.md).
 - Inspect the [API compatibility matrix](compatibility.md).
 - Configure TLS, SASL, ACLs, and production settings in the
   [implementation reference](implementation-reference.md).

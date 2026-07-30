@@ -42,6 +42,7 @@ Run the checks relevant to your change:
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --all-features --locked
+cargo audit
 ```
 
 PostgreSQL integration tests run when `RUTOMQ_TEST_PG_URL` is set:

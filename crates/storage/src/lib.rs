@@ -56,7 +56,7 @@ pub struct OpenDalObjectStore {
 
 impl OpenDalObjectStore {
     pub fn memory() -> Result<Self, StorageError> {
-        let operator = Operator::new(Memory::default())?.finish();
+        let operator = Operator::new(Memory::default())?;
         Ok(Self {
             operator,
             written: Arc::new(Mutex::new(Default::default())),
@@ -83,15 +83,13 @@ impl OpenDalObjectStore {
             builder = builder.secret_access_key(&secret_access_key);
         }
 
-        let operator = Operator::new(builder)?
-            .layer(
-                RetryLayer::new()
-                    .with_jitter()
-                    .with_min_delay(S3_RETRY_MIN_DELAY)
-                    .with_max_delay(S3_RETRY_MAX_DELAY)
-                    .with_max_times(S3_RETRY_MAX_TIMES),
-            )
-            .finish();
+        let operator = Operator::new(builder)?.layer(
+            RetryLayer::new()
+                .with_jitter()
+                .with_min_delay(S3_RETRY_MIN_DELAY)
+                .with_max_delay(S3_RETRY_MAX_DELAY)
+                .with_max_times(S3_RETRY_MAX_TIMES),
+        );
         Ok(Self {
             operator,
             written: Arc::new(Mutex::new(Default::default())),

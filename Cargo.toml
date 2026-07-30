@@ -29,12 +29,13 @@ hmac = "0.12"
 indexmap = "2"
 kafka-protocol = { path = "vendor/kafka-protocol" }
 lz4 = "1"
-opendal = { version = "0.57", features = ["services-s3", "services-memory"] }
+# This upstream 0.57 commit keeps the Rust 1.88 baseline while upgrading
+# quick-xml past RUSTSEC-2026-0194 and RUSTSEC-2026-0195.
+opendal = { git = "https://github.com/apache/opendal.git", rev = "3a28adce704dd2cfee9f9452df9472399188e7f5", features = ["services-s3", "services-memory"] }
 pbkdf2 = "0.12"
-prometheus = "0.13"
+prometheus = "0.14"
 rand = "0.9"
 regex = "1"
-rustls-pemfile = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

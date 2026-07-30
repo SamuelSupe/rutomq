@@ -453,7 +453,7 @@ mod tests {
             .registry
             .gather()
             .into_iter()
-            .find(|family| family.get_name() == "rutomq_partition_retention_size_percent")
+            .find(|family| family.name() == "rutomq_partition_retention_size_percent")
             .map_or(0, |family| family.get_metric().len())
     }
 }

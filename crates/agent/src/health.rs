@@ -584,7 +584,7 @@ mod tests {
             .registry
             .gather()
             .into_iter()
-            .map(|family| (family.get_name().to_owned(), family))
+            .map(|family| (family.name().to_owned(), family))
             .collect::<std::collections::BTreeMap<_, _>>();
 
         let bytes = families
@@ -595,7 +595,7 @@ mod tests {
             bytes
                 .get_metric()
                 .iter()
-                .all(|metric| metric.get_gauge().get_value() == 0.0)
+                .all(|metric| metric.get_gauge().value() == 0.0)
         );
         let discards = families
             .get("rutomq_coordinator_batch_buffer_cache_discards_total")
@@ -605,7 +605,7 @@ mod tests {
             discards
                 .get_metric()
                 .iter()
-                .all(|metric| metric.get_counter().get_value() == 0.0)
+                .all(|metric| metric.get_counter().value() == 0.0)
         );
     }
 }

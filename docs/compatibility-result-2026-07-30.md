@@ -1,14 +1,16 @@
-# rutomq compatibility result — 2026-07-29
+# rutomq compatibility result — 2026-07-30
 
 ## Result
 
 **PASS for the compatibility envelope described below.**
 
-This checkpoint records the current implementation as a dated result. It
-means that the listed protocol surface, clients, storage path, failure cases,
-and deployment scenarios passed together against the same source workspace.
-It does not claim complete semantic parity with every Apache Kafka deployment
-or every possible client configuration.
+This checkpoint records the v0.1.0 release candidate as a dated result. The
+broad acceptance baseline was established on 2026-07-29. After the release
+candidate's dependency and security updates, the Rust workspace, exact
+OpenDAL/MinIO data path, Flink 2.2.1 and 2.3.0 matrices, Kafka Java 3.9.2
+compatibility path, Kafka Streams scenarios, and TLS/SCRAM security suite were
+rerun successfully on 2026-07-30. It does not claim complete semantic parity
+with every Apache Kafka deployment or every possible client configuration.
 
 The API-by-API contract remains the source of truth for exact versions and
 behavior: [Kafka compatibility matrix](compatibility.md).
@@ -19,7 +21,7 @@ behavior: [Kafka compatibility matrix](compatibility.md).
 | --- | --- |
 | Wire baseline | Types generated from the official Kafka 4.3.0 schemas through `kafka-protocol 0.17.0-kafka.4.3.0` |
 | Advertised surface | 74 API keys; `ApiVersions` advertises only handled versions, apart from Kafka 4.3's required Produce 0-13 negotiation range while removed Produce v0-v2 remain rejected |
-| Backward compatibility | Kafka Java 3.9.1 AdminClient, Kafka Java 4.2.0 clients, librdkafka 2.15.0, and franz-go 1.21.5 passed |
+| Backward compatibility | Kafka Java 3.9.2 AdminClient, Kafka Java 4.2.0 clients, librdkafka 2.15.0, and franz-go 1.21.5 passed |
 | Flink | Flink 2.2.1 with Kafka connector 5.0.0-2.2 passed source, sink, checkpoint-offset recovery, and exact resume |
 | Kafka Streams | Kafka Streams 4.2.0 passed classic and Streams group protocols, `exactly_once_v2`, state restore, repartition, and standby promotion |
 | Persistence | PostgreSQL metadata plus immutable OpenDAL S3/MinIO objects; no Agent-local WAL, PVC, or data volume |
@@ -65,19 +67,20 @@ behavior: [Kafka compatibility matrix](compatibility.md).
 
 ## Validation evidence
 
-All commands exited successfully in OrbStack, using Rust 1.88 and a fresh
-PostgreSQL database named `rutomq_packet270_20260729`.
+The release-candidate regression gates ran in OrbStack with Rust 1.88 and
+isolated PostgreSQL and MinIO dependencies. The broader baseline rows were
+completed against the immediately preceding implementation checkpoint.
 
-| Gate | Evidence |
-| --- | --- |
-| Rust workspace | Formatting, strict all-target/all-feature Clippy, all workspace tests, fresh PostgreSQL integrations, and release build passed |
-| OpenDAL/MinIO | Multipart immutable write, cross-part range, replacement rejection, cross-Agent read, and a 10+ MiB Kafka object fetch passed |
-| Retention | Shared-object safety, durable deletion retry, replacement-Agent recovery, and zero remaining objects passed |
-| Native clients | librdkafka 2.15.0 and franz-go 1.21.5 acceptance passed |
-| Flink/Java/Streams | Flink 2.2.1, Kafka connector 5.0.0-2.2, Java Kafka 4.2.0, Kafka Streams 4.2.0, and Kafka 3.9.1 AdminClient acceptance passed |
-| Security | Kafka 4.3.1 TLS/SCRAM/ACL/delegation-token acceptance passed |
-| Multi-Agent | 900 unique records at contiguous offsets, 378 committed objects, format-v1 integrity, and zero orphan objects passed |
-| Kubernetes | 1,600 unique records at contiguous offsets across rollout and scaling, with zero PVCs, passed |
+| Gate | Last run | Evidence |
+| --- | --- | --- |
+| Rust workspace | 2026-07-30 | Formatting, strict all-target/all-feature Clippy, all workspace tests, fresh PostgreSQL integrations, release build, and RustSec audit passed |
+| OpenDAL/MinIO | 2026-07-30 | Multipart immutable write, exact range fetch, and a 10+ MiB Kafka object fetch passed against the pinned OpenDAL release-candidate dependency graph |
+| Flink/Java/Streams | 2026-07-30 | Flink 2.2.1 and 2.3.0, Kafka connector 5.0.0-2.2, Java Kafka 4.2.0, Kafka Streams 4.2.0, and Kafka 3.9.2 AdminClient acceptance passed |
+| Security | 2026-07-30 | Kafka 4.3.1 TLS/SCRAM/ACL/delegation-token acceptance passed after the certificate and private-key parser update |
+| Retention | 2026-07-29 baseline | Shared-object safety, durable deletion retry, replacement-Agent recovery, and zero remaining objects passed |
+| Native clients | 2026-07-29 baseline | librdkafka 2.15.0 and franz-go 1.21.5 acceptance passed |
+| Multi-Agent | 2026-07-29 baseline | 900 unique records at contiguous offsets, 378 committed objects, format-v1 integrity, and zero orphan objects passed |
+| Kubernetes | 2026-07-29 baseline | 1,600 unique records at contiguous offsets across rollout and scaling, with zero PVCs, passed |
 
 The executable acceptance gates are kept under `tests/`; each
 `run-orbstack.sh` entry point recreates its isolated dependencies and

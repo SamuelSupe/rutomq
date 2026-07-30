@@ -33,6 +33,12 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Classic group rebalance deadlines are evaluated by PostgreSQL, avoiding
   premature generations when Agent and database clocks differ.
 
+### Security
+
+- Upgraded the Prometheus exporter to `0.14`, the Kafka 3 compatibility fixture
+  to `kafka-clients 3.9.2`, and OpenDAL's XML parser to its upstream `0.41`
+  security fix; replaced the unmaintained `rustls-pemfile` parser.
+
 ### Known boundaries
 
 - `0.1.0` is a public preview, not a claim of complete Apache Kafka semantic

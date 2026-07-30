@@ -93,12 +93,12 @@ Flink commits source offsets asynchronously after checkpoint completion. The
 verifier waits up to 15 seconds for the final bounded-source offsets to reach
 the exact expected value; it never accepts a partial commit.
 
-Validated on 2026-07-29:
+Validated on 2026-07-30:
 
 | Flink runtime | Connector | Kafka client | Records | Result |
 | --- | --- | --- | ---: | --- |
 | 2.2.1 | 5.0.0-2.2 | 4.2.0 | 1,000 | passed, including KIP-1263 assignment batching, FindCoordinator v4-v6 and transaction-query semantics, six-codec topic compression, record admission, classic static fencing, stateful Streams/standby, share duration reset, compaction, and KIP-939 recovery |
-| 2.3.0 | 5.0.0-2.2 | 4.2.0 | 500 | passed |
+| 2.3.0 | 5.0.0-2.2 | 4.2.0 | 1,000 | passed |
 
 Run with OrbStack:
 

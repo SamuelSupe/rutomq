@@ -20,7 +20,7 @@
 > `v0.1.0` is a public preview. It passed the documented Kafka client, Flink,
 > Kafka Streams, multi-Agent, security, and Kubernetes acceptance envelope, but
 > it does not claim complete semantic parity with every Apache Kafka deployment.
-> See the [dated compatibility result](docs/compatibility-result-2026-07-29.md)
+> See the [dated compatibility result](docs/compatibility-result-2026-07-30.md)
 > and [API matrix](docs/compatibility.md) before production evaluation.
 
 ## Why rutomq
@@ -61,12 +61,12 @@ checksums, and reads only the required object ranges.
 
 ## Compatibility snapshot
 
-The `2026-07-29` release checkpoint validated:
+The `2026-07-30` release checkpoint validated:
 
 | Area | Tested envelope |
 | --- | --- |
 | Kafka protocol | 74 API keys generated from Kafka 4.3 schemas; exact versions are listed in the matrix |
-| Clients | Kafka Java 3.9.1 AdminClient, Kafka Java 4.2.0, librdkafka 2.15.0, franz-go 1.21.5 |
+| Clients | Kafka Java 3.9.2 AdminClient, Kafka Java 4.2.0, librdkafka 2.15.0, franz-go 1.21.5 |
 | Stream processing | Flink 2.2.1 + Kafka connector 5.0.0-2.2; Kafka Streams 4.2.0 |
 | Delivery semantics | Idempotent Produce, transactions, `read_committed`, offset recovery, compression |
 | Groups | Classic, Kafka 4 consumer, share, and Streams group protocols |
@@ -76,7 +76,7 @@ The `2026-07-29` release checkpoint validated:
 
 The full result explicitly documents unsupported and virtualized behavior:
 
-- [Compatibility result](docs/compatibility-result-2026-07-29.md)
+- [Compatibility result](docs/compatibility-result-2026-07-30.md)
 - [API-by-API compatibility matrix](docs/compatibility.md)
 - [Detailed implementation reference](docs/implementation-reference.md)
 
@@ -181,6 +181,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --all-features --locked
 cargo build --release --workspace --locked
+cargo audit
 ```
 
 Integration and compatibility suites run through their `run-orbstack.sh`

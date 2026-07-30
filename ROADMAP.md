@@ -14,7 +14,7 @@ This roadmap communicates direction rather than dates or guaranteed scope.
 - TLS, SCRAM, delegation tokens, ACLs, quotas, metrics, and Helm deployment.
 
 The validated envelope is recorded in
-[`docs/compatibility-result-2026-07-29.md`](docs/compatibility-result-2026-07-29.md).
+[`docs/compatibility-result-2026-07-30.md`](docs/compatibility-result-2026-07-30.md).
 
 ## v0.2 — compatibility closure
 
