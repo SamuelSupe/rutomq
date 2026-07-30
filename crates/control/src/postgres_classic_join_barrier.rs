@@ -531,12 +531,12 @@ async fn start_rebalance(
         "UPDATE consumer_groups
          SET protocol_type = $2, protocol_name = $3, leader_id = $4,
              classic_rebalance_id = $5, classic_rebalance_pending = TRUE,
-             classic_rebalance_started_at = now(),
+             classic_rebalance_started_at = clock_timestamp(),
              classic_rebalance_deadline =
-                 now() + $6 * interval '1 millisecond',
+                 clock_timestamp() + $6 * interval '1 millisecond',
              classic_initial_rebalance_deadline =
                  CASE WHEN $7
-                      THEN now() + LEAST($8, $6) * interval '1 millisecond'
+                      THEN clock_timestamp() + LEAST($8, $6) * interval '1 millisecond'
                       ELSE NULL END,
              empty_since_ms = NULL,
              updated_at = now()
@@ -573,7 +573,7 @@ async fn extend_rebalance(
                  WHEN classic_initial_rebalance_deadline IS NULL THEN NULL
                  ELSE LEAST(
                      classic_rebalance_deadline,
-                     now() + $2 * interval '1 millisecond'
+                     clock_timestamp() + $2 * interval '1 millisecond'
                  )
              END,
              updated_at = now()
