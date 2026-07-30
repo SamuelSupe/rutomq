@@ -5,6 +5,7 @@
 <p align="center">
   <a href="https://github.com/SamuelSupe/rutomq/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/SamuelSupe/rutomq/actions/workflows/ci.yml/badge.svg"></a>
   <a href="https://github.com/SamuelSupe/rutomq/releases/latest"><img alt="GitHub release" src="https://img.shields.io/github/v/release/SamuelSupe/rutomq?display_name=tag&sort=semver"></a>
+  <a href="https://samuelsupe.github.io/rutomq/"><img alt="Project website" src="https://img.shields.io/badge/website-GitHub_Pages-147D73"></a>
   <a href="https://github.com/SamuelSupe/rutomq/blob/main/LICENSE"><img alt="Apache-2.0" src="https://img.shields.io/github/license/SamuelSupe/rutomq"></a>
   <img alt="Rust 1.88" src="https://img.shields.io/badge/Rust-1.88-CE412B?logo=rust&logoColor=white">
   <img alt="Kafka 4.3 wire baseline" src="https://img.shields.io/badge/Kafka_wire_baseline-4.3-231F20?logo=apachekafka&logoColor=white">
@@ -67,7 +68,7 @@ The `2026-07-30` release checkpoint validated:
 | --- | --- |
 | Kafka protocol | 74 API keys generated from Kafka 4.3 schemas; exact versions are listed in the matrix |
 | Clients | Kafka Java 3.9.2 AdminClient, Kafka Java 4.2.0, librdkafka 2.15.0, franz-go 1.21.5 |
-| Stream processing | Flink 2.2.1 + Kafka connector 5.0.0-2.2; Kafka Streams 4.2.0 |
+| Stream processing | Flink 2.2.1 and 2.3.0; Kafka connector 5.0.0-2.2; Kafka Streams 4.2.0 |
 | Delivery semantics | Idempotent Produce, transactions, `read_committed`, offset recovery, compression |
 | Groups | Classic, Kafka 4 consumer, share, and Streams group protocols |
 | Security | TLS, SCRAM-SHA-256/512, delegation tokens, ACLs, quotas |
@@ -124,6 +125,22 @@ docker compose -f deploy/compose.dev.yml down -v
 ```
 
 [Continue with the quick-start guide →](docs/quickstart.md)
+
+### Install a Linux package
+
+The release also provides native Debian and RPM packages for x86-64 and ARM64.
+Packages install a hardened systemd unit and configuration template, but do not
+start the service before external PostgreSQL and object storage are configured.
+
+```bash
+# Debian or Ubuntu on x86-64
+curl -LO \
+  https://github.com/SamuelSupe/rutomq/releases/download/v0.1.0/rutomq_0.1.0_amd64.deb
+sudo apt install ./rutomq_0.1.0_amd64.deb
+```
+
+See the [Linux package guide](docs/packaging.md) for Debian `arm64` and RPM
+`x86_64`/`aarch64` filenames, configuration, and service commands.
 
 ## Deploy
 

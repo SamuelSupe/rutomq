@@ -1,0 +1,17 @@
+#!/bin/sh
+set -e
+
+if ! getent group rutomq >/dev/null 2>&1; then
+    addgroup --system rutomq
+fi
+
+if ! getent passwd rutomq >/dev/null 2>&1; then
+    adduser \
+        --system \
+        --ingroup rutomq \
+        --home /nonexistent \
+        --no-create-home \
+        --disabled-login \
+        --gecos "rutomq service" \
+        rutomq
+fi

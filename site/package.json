@@ -1,0 +1,15 @@
+{
+  "name": "rutomq-pages",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "check": "node check.mjs"
+  },
+  "dependencies": {
+    "@primer/css": "22.3.0"
+  }
+}

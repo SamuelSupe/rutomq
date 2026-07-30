@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>rutomq | Stateless Kafka-compatible messaging</title>
+    <meta
+      name="description"
+      content="A Rust message queue with Kafka protocol compatibility, PostgreSQL ordering, and direct S3-compatible object storage durability."
+    >
+    <meta name="theme-color" content="#091521">
+    <meta property="og:type" content="website">
+    <meta property="og:title" content="rutomq | Stateless Kafka-compatible messaging">
+    <meta
+      property="og:description"
+      content="Kafka semantics, object storage durability, and no Agent-local WAL."
+    >
+    <meta
+      property="og:image"
+      content="https://samuelsupe.github.io/rutomq/assets/rutomq-data-path.webp"
+    >
+    <meta property="og:url" content="https://samuelsupe.github.io/rutomq/">
+    <meta name="twitter:card" content="summary_large_image">
+    <link rel="icon" type="image/svg+xml" href="assets/rutomq-mark.svg">
+    <link rel="stylesheet" href="primer.css">
+    <link rel="stylesheet" href="styles.css">
+    <script>document.documentElement.classList.add("js");</script>
+    <script src="script.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#content">Skip to content</a>
+
+    <header class="site-header">
+      <nav class="nav-shell" aria-label="Primary navigation">
+        <a class="brand" href="./" aria-label="rutomq home">
+          <img src="assets/rutomq-mark.svg" width="36" height="36" alt="">
+          <span>rutomq</span>
+        </a>
+        <button
+          class="nav-toggle"
+          type="button"
+          aria-controls="primary-links"
+          aria-expanded="false"
+          data-nav-toggle
+        >
+          Menu
+        </button>
+        <div class="nav-links" id="primary-links" data-nav-links>
+          <a href="#architecture">Architecture</a>
+          <a href="#compatibility">Compatibility</a>
+          <a href="#install">Install</a>
+          <a href="https://github.com/SamuelSupe/rutomq/tree/main/docs">Docs</a>
+          <a
+            class="nav-github"
+            href="https://github.com/SamuelSupe/rutomq"
+            target="_blank"
+            rel="noreferrer"
+          >GitHub</a>
+        </div>
+      </nav>
+    </header>
+
+    <main id="content">
+      <section class="hero page-shell" aria-labelledby="hero-title">
+        <div class="hero-copy">
+          <p class="eyebrow">Stateless Kafka-compatible messaging</p>
+          <h1 id="hero-title">Kafka semantics. Object storage durability.</h1>
+          <p class="hero-summary">
+            A stateless Rust message queue committing durable records to S3 and
+            ordered metadata to PostgreSQL.
+          </p>
+          <div class="hero-actions">
+            <a class="button button-primary" href="#install">Install packages</a>
+            <a
+              class="button button-secondary"
+              href="https://github.com/SamuelSupe/rutomq"
+              target="_blank"
+              rel="noreferrer"
+            >View GitHub</a>
+          </div>
+        </div>
+        <figure class="hero-art">
+          <img
+            src="assets/rutomq-data-path.webp"
+            width="1774"
+            height="887"
+            alt="Replaceable compute nodes move immutable record blocks into durable object storage while a separate metadata lattice preserves ordering."
+          >
+        </figure>
+      </section>
+
+      <section class="proof-strip" aria-label="Compatibility snapshot">
+        <div class="page-shell proof-grid">
+          <div>
+            <strong>74</strong>
+            <span>Kafka API keys</span>
+          </div>
+          <div>
+            <strong>2.2.1 + 2.3.0</strong>
+            <span>Flink acceptance</span>
+          </div>
+          <div>
+            <strong>Zero</strong>
+            <span>Agent-local WAL</span>
+          </div>
+          <div>
+            <strong>Apache-2.0</strong>
+            <span>Open-source license</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="section page-shell reveal" id="architecture">
+        <div class="section-heading">
+          <h2>Durability without broker disks.</h2>
+          <p>
+            Produce is acknowledged only after the immutable object exists and
+            PostgreSQL commits its ordered span metadata.
+          </p>
+        </div>
+        <ol class="data-path">
+          <li>
+            <span class="path-index">A</span>
+            <h3>Batch in memory</h3>
+            <p>Bounded batches flush on the configured time or size threshold.</p>
+          </li>
+          <li>
+            <span class="path-index">B</span>
+            <h3>Write immutable objects</h3>
+            <p>OpenDAL writes unique objects across topics and partitions.</p>
+          </li>
+          <li>
+            <span class="path-index">C</span>
+            <h3>Commit ordered spans</h3>
+            <p>PostgreSQL allocates offsets and atomically publishes visibility.</p>
+          </li>
+          <li>
+            <span class="path-index">D</span>
+            <h3>Fetch exact ranges</h3>
+            <p>Agents resolve ordered spans and read only the required bytes.</p>
+          </li>
+        </ol>
+      </section>
+
+      <section class="section page-shell reveal" aria-labelledby="stateless-title">
+        <div class="section-heading compact-heading">
+          <h2 id="stateless-title">Any Agent can serve any partition.</h2>
+        </div>
+        <div class="feature-grid">
+          <article class="feature feature-primary">
+            <span class="feature-kicker">Replaceable compute</span>
+            <h3>No partition data lives on the Agent.</h3>
+            <p>
+              Scale, replace, or roll Agents without moving replica logs or
+              attaching persistent volumes.
+            </p>
+          </article>
+          <article class="feature feature-tinted">
+            <h3>Kafka clients stay Kafka clients.</h3>
+            <p>Java, librdkafka, franz-go, Flink, and Kafka Streams use the wire protocol.</p>
+          </article>
+          <article class="feature">
+            <h3>Object ranges replace log replicas.</h3>
+            <p>Immutable shared objects support exact range reads and orphan cleanup.</p>
+          </article>
+          <article class="feature feature-grid-pattern">
+            <h3>One ordered control plane.</h3>
+            <p>Offsets, groups, transactions, ACLs, and object spans converge in PostgreSQL.</p>
+          </article>
+          <article class="feature feature-boundary">
+            <h3>Compatibility claims stay explicit.</h3>
+            <p>ApiVersions advertises handled versions and rejects unsupported behavior.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="section compatibility-section reveal" id="compatibility">
+        <div class="page-shell">
+          <div class="section-heading">
+            <h2>Compatibility is measured, not implied.</h2>
+            <p>
+              The dated acceptance result records exact clients, versions, fault
+              cases, and unsupported physical broker behavior.
+            </p>
+          </div>
+          <div class="compatibility-layout">
+            <div class="client-list" aria-label="Validated clients">
+              <div><strong>Kafka Java</strong><span>3.9.2 and 4.2.0</span></div>
+              <div><strong>Flink</strong><span>2.2.1 and 2.3.0</span></div>
+              <div><strong>Kafka Streams</strong><span>4.2.0</span></div>
+              <div><strong>librdkafka</strong><span>2.15.0</span></div>
+              <div><strong>franz-go</strong><span>1.21.5</span></div>
+            </div>
+            <aside class="boundary-note">
+              <h3>Public preview boundary</h3>
+              <p>
+                rutomq virtualizes broker topology. It does not invent physical
+                ISR replicas, local log directories, or KRaft state.
+              </p>
+              <a href="https://github.com/SamuelSupe/rutomq/blob/main/docs/compatibility-result-2026-07-30.md">
+                Read the acceptance result
+              </a>
+              <a href="https://github.com/SamuelSupe/rutomq/blob/main/docs/compatibility.md">
+                Inspect the API matrix
+              </a>
+            </aside>
+          </div>
+        </div>
+      </section>
+
+      <section class="section page-shell reveal" id="install">
+        <div class="section-heading">
+          <h2>Install the package for your architecture.</h2>
+          <p>
+            Debian and RPM packages include the binary, a hardened systemd unit,
+            and an environment template. Installation does not start the service.
+          </p>
+        </div>
+        <div class="installer">
+          <div class="installer-controls">
+            <div class="selector">
+              <span class="selector-label">Distribution</span>
+              <div class="button-group" aria-label="Distribution package type">
+                <button type="button" aria-pressed="true" data-package="deb">Debian</button>
+                <button type="button" aria-pressed="false" data-package="rpm">RPM</button>
+              </div>
+            </div>
+            <div class="selector">
+              <span class="selector-label">Architecture</span>
+              <div class="button-group" aria-label="CPU architecture">
+                <button type="button" aria-pressed="true" data-arch="x86_64">x86-64</button>
+                <button type="button" aria-pressed="false" data-arch="arm64">ARM64</button>
+              </div>
+            </div>
+          </div>
+          <div class="command-panel">
+            <div class="command-toolbar">
+              <span data-package-filename>rutomq_0.1.0_amd64.deb</span>
+              <button type="button" data-copy-command>Copy</button>
+            </div>
+            <pre><code data-install-command></code></pre>
+            <p class="copy-status" role="status" aria-live="polite" data-copy-status></p>
+          </div>
+          <div class="installer-footer">
+            <p>
+              Configure <code>/etc/rutomq/rutomq.env</code> before enabling the service.
+            </p>
+            <a href="https://github.com/SamuelSupe/rutomq/blob/main/docs/packaging.md">
+              Package documentation
+            </a>
+          </div>
+        </div>
+      </section>
+
+      <section class="section page-shell docs-section reveal" aria-labelledby="docs-title">
+        <div>
+          <h2 id="docs-title">Evaluate the real operating envelope.</h2>
+          <p>
+            Start locally with Compose, inspect consistency semantics, then move
+            the stateless Agent deployment to Kubernetes.
+          </p>
+        </div>
+        <div class="docs-links">
+          <a href="https://github.com/SamuelSupe/rutomq/blob/main/docs/quickstart.md">
+            <strong>Quick start</strong>
+            <span>Run PostgreSQL, MinIO, and one Agent.</span>
+          </a>
+          <a href="https://github.com/SamuelSupe/rutomq/blob/main/docs/architecture.md">
+            <strong>Architecture</strong>
+            <span>Read the write, visibility, and recovery model.</span>
+          </a>
+          <a href="https://github.com/SamuelSupe/rutomq/tree/main/deploy/helm/rutomq">
+            <strong>Helm chart</strong>
+            <span>Deploy Agents without persistent volumes.</span>
+          </a>
+        </div>
+      </section>
+
+      <section class="final-cta">
+        <div class="page-shell">
+          <h2>Run it where Kafka clients already live.</h2>
+          <p>Keep compute replaceable and durable state in shared infrastructure.</p>
+          <div class="hero-actions">
+            <a
+              class="button button-primary"
+              href="https://github.com/SamuelSupe/rutomq/releases/tag/v0.1.0"
+            >Download release</a>
+            <a
+              class="button button-secondary"
+              href="https://github.com/SamuelSupe/rutomq/discussions"
+            >Join discussions</a>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="page-shell footer-layout">
+        <div class="brand footer-brand">
+          <img src="assets/rutomq-mark.svg" width="30" height="30" alt="">
+          <span>rutomq</span>
+        </div>
+        <p>Rust, PostgreSQL, OpenDAL, and S3-compatible object storage.</p>
+        <div class="footer-links">
+          <a href="https://github.com/SamuelSupe/rutomq/blob/main/LICENSE">Apache-2.0</a>
+          <a href="https://github.com/SamuelSupe/rutomq/blob/main/SECURITY.md">Security</a>
+          <a href="https://github.com/SamuelSupe/rutomq">Source</a>
+        </div>
+      </div>
+    </footer>
+  </body>
+</html>

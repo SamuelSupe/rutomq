@@ -4,6 +4,18 @@ on:
   release:
     types:
       - published
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to package
+        required: true
+        default: v0.1.0
+        type: string
+      rebuild_core_assets:
+        description: Rebuild the binary archive and Helm chart
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -12,20 +24,21 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
 
 jobs:
-  package:
+  core-assets:
     name: Linux x86-64 and Helm
+    if: github.event_name == 'release' || inputs.rebuild_core_assets
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      RELEASE_TAG: ${{ github.event.release.tag_name }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - name: Check out release tag
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.88.0 --profile minimal
@@ -83,3 +96,169 @@ jobs:
 
       - name: Upload release assets
         run: gh release upload "${RELEASE_TAG}" dist/* --clobber --repo "${GITHUB_REPOSITORY}"
+
+  linux-packages:
+    name: Packages (${{ matrix.rpm_arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            deb_arch: amd64
+            rpm_arch: x86_64
+            platform: linux/amd64
+          - runner: ubuntu-24.04-arm
+            deb_arch: arm64
+            rpm_arch: aarch64
+            platform: linux/arm64
+    steps:
+      - name: Check out packaging tooling
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Check out release tag
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          path: release-source
+
+      - name: Cache Cargo
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            release-source/target
+          key: packages-${{ runner.os }}-${{ runner.arch }}-1.88-${{ hashFiles('release-source/**/Cargo.lock') }}
+          restore-keys: |
+            packages-${{ runner.os }}-${{ runner.arch }}-1.88-
+
+      - name: Verify release version
+        run: |
+          set -euo pipefail
+          package_version="$(
+            docker run --rm \
+              --volume "${PWD}:/workspace" \
+              --workdir /workspace/release-source \
+              rust:1.88-bookworm \
+              cargo metadata --no-deps --format-version 1 |
+              jq -r '.packages[] | select(.name == "rutomq") | .version'
+          )"
+          test "${RELEASE_TAG}" = "v${package_version}"
+
+      - name: Build portable native binary
+        run: |
+          set -euo pipefail
+          mkdir -p "${HOME}/.cargo/registry" "${HOME}/.cargo/git"
+          docker run --rm \
+            --platform "${{ matrix.platform }}" \
+            --volume "${PWD}:/workspace" \
+            --volume "${HOME}/.cargo/registry:/usr/local/cargo/registry" \
+            --volume "${HOME}/.cargo/git:/usr/local/cargo/git" \
+            --workdir /workspace/release-source \
+            rust:1.88-bookworm \
+            cargo build --release --locked --bin rutomq
+          sudo chown -R "$(id -u):$(id -g)" "${HOME}/.cargo" release-source/target
+          file release-source/target/release/rutomq
+          test "$(file -b release-source/target/release/rutomq)" != ""
+          max_glibc="$(
+            objdump -T release-source/target/release/rutomq |
+              sed -n 's/.*(GLIBC_\([^)]*\)).*/\1/p' |
+              sort -V |
+              tail -1
+          )"
+          test "$(printf '%s\n' "${max_glibc}" 2.34 | sort -V | tail -1)" = "2.34"
+
+      - name: Install packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes rpm
+
+      - name: Build Debian and RPM packages
+        run: |
+          ./scripts/package-linux.sh \
+            "${RELEASE_TAG#v}" \
+            release-source/target/release/rutomq \
+            "${{ matrix.deb_arch }}" \
+            "${{ matrix.rpm_arch }}" \
+            "dist/${{ matrix.rpm_arch }}"
+
+      - name: Test package installation
+        run: |
+          ./scripts/test-linux-packages.sh \
+            "${RELEASE_TAG#v}" \
+            "${{ matrix.deb_arch }}" \
+            "${{ matrix.rpm_arch }}" \
+            "dist/${{ matrix.rpm_arch }}"
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-packages-${{ matrix.rpm_arch }}
+          path: dist/${{ matrix.rpm_arch }}/*
+          if-no-files-found: error
+
+  publish-packages:
+    name: Publish system packages
+    needs:
+      - core-assets
+      - linux-packages
+    if: >-
+      always() &&
+      needs.linux-packages.result == 'success' &&
+      (needs.core-assets.result == 'success' || needs.core-assets.result == 'skipped')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Download package artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: linux-packages-*
+          path: dist
+          merge-multiple: true
+
+      - name: Attest system packages
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            dist/*.deb
+            dist/*.rpm
+
+      - name: Build complete checksum manifest
+        run: |
+          set -euo pipefail
+          mkdir checksum-assets
+          gh release download "${RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --dir checksum-assets \
+            --pattern '*.tar.gz' \
+            --pattern '*.tgz'
+          install -m 0644 dist/*.deb dist/*.rpm checksum-assets/
+          (
+            cd checksum-assets
+            manifest="$(mktemp)"
+            find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\0' |
+              sort -z |
+              xargs -0 sha256sum >"${manifest}"
+            mv "${manifest}" SHA256SUMS
+            sha256sum --check SHA256SUMS
+          )
+
+      - name: Attest checksum manifest
+        uses: actions/attest@v4
+        with:
+          subject-path: checksum-assets/SHA256SUMS
+
+      - name: Upload packages and checksums
+        run: |
+          gh release upload "${RELEASE_TAG}" \
+            dist/*.deb \
+            dist/*.rpm \
+            checksum-assets/SHA256SUMS \
+            --clobber \
+            --repo "${GITHUB_REPOSITORY}"

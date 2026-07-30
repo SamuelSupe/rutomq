@@ -36,7 +36,7 @@ The validated envelope is recorded in
 - Expand failure injection for dependency throttling, long outages, and
   high-cardinality coordinator workloads.
 - Improve operator-facing diagnostics, capacity guidance, and recovery drills.
-- Evaluate multi-architecture release artifacts and signed container images.
+- Evaluate signed multi-architecture container images.
 
 ## v1.0 — stable compatibility contract
 

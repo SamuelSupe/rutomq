@@ -7,6 +7,14 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Native Debian packages for `amd64` and `arm64`, plus RPM packages for
+  `x86_64` and `aarch64`, with a hardened systemd service and external
+  dependency configuration template.
+- A responsive GitHub Pages project site with architecture, compatibility, and
+  package-installation guidance.
+
 ## [0.1.0] - 2026-07-30
 
 ### Added

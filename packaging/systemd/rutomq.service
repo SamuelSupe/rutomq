@@ -1,0 +1,35 @@
+[Unit]
+Description=rutomq stateless Kafka-compatible message queue
+Documentation=https://samuelsupe.github.io/rutomq/
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=rutomq
+Group=rutomq
+EnvironmentFile=/etc/rutomq/rutomq.env
+ExecStart=/usr/bin/rutomq agent
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=60s
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

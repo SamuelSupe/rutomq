@@ -1,0 +1,71 @@
+Name:           rutomq
+Version:        @VERSION@
+Release:        1
+Summary:        Stateless Kafka-compatible message queue
+License:        Apache-2.0
+URL:            https://samuelsupe.github.io/rutomq/
+BuildArch:      @RPM_ARCH@
+Requires:       glibc >= 2.34
+Requires:       libgcc
+Requires:       ca-certificates
+Requires:       systemd
+Requires(pre):  shadow-utils
+
+Source0:        rutomq
+Source1:        rutomq.service
+Source2:        rutomq.env
+Source3:        README.md
+Source4:        LICENSE
+
+%description
+rutomq is a Rust message queue that writes durable records directly to
+S3-compatible object storage and keeps ordered metadata in PostgreSQL. Agents
+require no local WAL or persistent volume.
+
+%prep
+
+%build
+
+%install
+install -D -m 0755 %{SOURCE0} %{buildroot}%{_bindir}/rutomq
+install -D -m 0644 %{SOURCE1} %{buildroot}%{_unitdir}/rutomq.service
+install -D -m 0640 %{SOURCE2} %{buildroot}%{_sysconfdir}/rutomq/rutomq.env
+install -D -m 0644 %{SOURCE3} %{buildroot}%{_docdir}/rutomq/README.md
+install -D -m 0644 %{SOURCE4} %{buildroot}%{_licensedir}/rutomq/LICENSE
+
+%pre
+getent group rutomq >/dev/null 2>&1 || groupadd -r rutomq
+getent passwd rutomq >/dev/null 2>&1 || \
+    useradd -r -g rutomq -d / -s /sbin/nologin -c "rutomq service" rutomq
+exit 0
+
+%post
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+fi
+printf '%s\n' \
+    "rutomq was installed but not started." \
+    "Configure /etc/rutomq/rutomq.env, then run:" \
+    "  systemctl enable --now rutomq"
+
+%preun
+if [ "$1" -eq 0 ] && command -v systemctl >/dev/null 2>&1; then
+    systemctl disable --now rutomq.service >/dev/null 2>&1 || true
+fi
+
+%postun
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+fi
+
+%files
+%license %{_licensedir}/rutomq/LICENSE
+%doc %{_docdir}/rutomq/README.md
+%{_bindir}/rutomq
+%{_unitdir}/rutomq.service
+%dir %{_sysconfdir}/rutomq
+%config(noreplace) %{_sysconfdir}/rutomq/rutomq.env
+
+%changelog
+* Thu Jul 30 2026 SamuelSupe <SamuelSupe@users.noreply.github.com> - @VERSION@-1
+- Publish the first rutomq system package.

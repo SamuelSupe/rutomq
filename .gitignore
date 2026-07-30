@@ -1,8 +1,11 @@
 target/
+/dist/
 .env
 *.log
 .DS_Store
 tests/flink/runtime/
 tests/security/runtime/
 .workflow/
+site/node_modules/
+site/dist/
 vendor/kafka-protocol/src/messages/* [0-9]*.rs

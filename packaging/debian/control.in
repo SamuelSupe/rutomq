@@ -1,0 +1,12 @@
+Package: rutomq
+Version: @VERSION@
+Section: net
+Priority: optional
+Architecture: @DEB_ARCH@
+Maintainer: SamuelSupe <SamuelSupe@users.noreply.github.com>
+Depends: adduser, ca-certificates, libc6 (>= 2.34), libgcc-s1, systemd
+Homepage: https://samuelsupe.github.io/rutomq/
+Description: Stateless Kafka-compatible message queue
+ rutomq is a Rust message queue that writes durable records directly to
+ S3-compatible object storage and keeps ordered metadata in PostgreSQL. Agents
+ require no local WAL or persistent volume.

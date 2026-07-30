@@ -1,0 +1,13 @@
+#!/bin/sh
+set -e
+
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+fi
+
+if [ "$1" = "configure" ]; then
+    printf '%s\n' \
+        "rutomq was installed but not started." \
+        "Configure /etc/rutomq/rutomq.env, then run:" \
+        "  systemctl enable --now rutomq"
+fi
