@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use rutomq_agent::{AgentConfig, Broker, DEFAULT_LOG_FILTER, Metrics, serve_admin};
 use rutomq_control::{MemoryMetadataStore, MetadataStore, PostgresMetadataStore};
@@ -21,6 +21,12 @@ struct Cli {
 enum Command {
     Agent,
     Migrate,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ObjectStoreBackend {
+    Memory,
+    S3,
 }
 
 #[tokio::main]
@@ -50,14 +56,12 @@ async fn run_agent() -> Result<()> {
         info!("DATABASE_URL is not configured; using in-memory metadata (development only)");
         Arc::new(MemoryMetadataStore::new())
     };
-    let objects: Arc<dyn ObjectStore> = if std::env::var("OBJECT_STORE_BACKEND")
-        .unwrap_or_else(|_| "memory".into())
-        .eq_ignore_ascii_case("s3")
-    {
-        Arc::new(OpenDalObjectStore::s3(s3_config_from_env()?)?)
-    } else {
-        info!("OBJECT_STORE_BACKEND is not s3; using in-memory objects (development only)");
-        Arc::new(OpenDalObjectStore::memory()?)
+    let objects: Arc<dyn ObjectStore> = match object_store_backend_from_env()? {
+        ObjectStoreBackend::S3 => Arc::new(OpenDalObjectStore::s3(s3_config_from_env()?)?),
+        ObjectStoreBackend::Memory => {
+            info!("using in-memory objects (development only)");
+            Arc::new(OpenDalObjectStore::memory()?)
+        }
     };
     let metrics = Arc::new(Metrics::new()?);
     metadata.check().await.context("check metadata store")?;
@@ -89,6 +93,24 @@ async fn run_migrate() -> Result<()> {
     store.migrate().await?;
     info!("database migrations completed");
     Ok(())
+}
+
+fn object_store_backend_from_env() -> Result<ObjectStoreBackend> {
+    match std::env::var("OBJECT_STORE_BACKEND") {
+        Ok(value) => parse_object_store_backend(&value),
+        Err(std::env::VarError::NotPresent) => Ok(ObjectStoreBackend::Memory),
+        Err(error) => Err(error).context("read OBJECT_STORE_BACKEND"),
+    }
+}
+
+fn parse_object_store_backend(value: &str) -> Result<ObjectStoreBackend> {
+    if value.eq_ignore_ascii_case("memory") {
+        Ok(ObjectStoreBackend::Memory)
+    } else if value.eq_ignore_ascii_case("s3") {
+        Ok(ObjectStoreBackend::S3)
+    } else {
+        bail!("OBJECT_STORE_BACKEND must be memory or s3")
+    }
 }
 
 fn s3_config_from_env() -> Result<S3Config> {
@@ -144,4 +166,23 @@ async fn shutdown_signal() -> Result<()> {
 
     info!("agent shutdown requested");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ObjectStoreBackend, parse_object_store_backend};
+
+    #[test]
+    fn object_store_backend_rejects_unknown_values() {
+        assert_eq!(
+            parse_object_store_backend("memory").unwrap(),
+            ObjectStoreBackend::Memory
+        );
+        assert_eq!(
+            parse_object_store_backend("S3").unwrap(),
+            ObjectStoreBackend::S3
+        );
+        assert!(parse_object_store_backend("s33").is_err());
+        assert!(parse_object_store_backend("").is_err());
+    }
 }

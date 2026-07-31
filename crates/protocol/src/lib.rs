@@ -18,6 +18,8 @@ pub enum ProtocolError {
     IncompleteFrame,
     #[error("unknown Kafka API key {0}")]
     UnknownApiKey(i16),
+    #[error("Kafka response frame length {0} exceeds the maximum")]
+    ResponseFrameTooLarge(usize),
     #[error("protocol codec error: {0}")]
     Codec(#[from] anyhow::Error),
 }
@@ -69,16 +71,37 @@ pub fn encode_response<T: Encodable>(
     response: &T,
 ) -> Result<Bytes, ProtocolError> {
     let header_version = api_key.response_header_version(version);
-    let mut payload = BytesMut::with_capacity(1024);
-    ResponseHeader::default()
-        .with_correlation_id(correlation_id)
-        .encode(&mut payload, header_version)?;
-    response.encode(&mut payload, body_version(api_key, version))?;
+    let response_version = body_version(api_key, version);
+    let header = ResponseHeader::default().with_correlation_id(correlation_id);
+    let frame_size = response_frame_size(api_key, version, response)?;
+    let payload_size = frame_size - 4;
+    let frame_size = i32::try_from(payload_size)
+        .map_err(|_| ProtocolError::ResponseFrameTooLarge(payload_size))?;
 
-    let mut frame = BytesMut::with_capacity(4 + payload.len());
-    frame.put_i32(payload.len() as i32);
-    frame.extend_from_slice(&payload);
+    let mut frame = BytesMut::with_capacity(4 + payload_size);
+    frame.put_i32(frame_size);
+    header.encode(&mut frame, header_version)?;
+    response.encode(&mut frame, response_version)?;
     Ok(frame.freeze())
+}
+
+pub fn response_frame_size<T: Encodable>(
+    api_key: ApiKey,
+    version: i16,
+    response: &T,
+) -> Result<usize, ProtocolError> {
+    let header_version = api_key.response_header_version(version);
+    let response_version = body_version(api_key, version);
+    let payload_size = ResponseHeader::default()
+        .compute_size(header_version)?
+        .checked_add(response.compute_size(response_version)?)
+        .ok_or(ProtocolError::ResponseFrameTooLarge(usize::MAX))?;
+    if payload_size > MAX_FRAME_SIZE {
+        return Err(ProtocolError::ResponseFrameTooLarge(payload_size));
+    }
+    payload_size
+        .checked_add(4)
+        .ok_or(ProtocolError::ResponseFrameTooLarge(usize::MAX))
 }
 
 pub fn api_versions() -> Vec<(i16, i16, i16)> {
@@ -190,8 +213,21 @@ mod tests {
     use kafka_protocol::messages::{
         ApiVersionsRequest, DescribeLogDirsResponse, InitProducerIdRequest, TransactionalId,
     };
+    use kafka_protocol::protocol::buf::ByteBufMut;
     use kafka_protocol::protocol::{Encodable, StrBytes};
     use std::collections::BTreeMap;
+
+    struct OversizedResponse;
+
+    impl Encodable for OversizedResponse {
+        fn encode<B: ByteBufMut>(&self, _buf: &mut B, _version: i16) -> anyhow::Result<()> {
+            panic!("oversized response must be rejected before encoding")
+        }
+
+        fn compute_size(&self, _version: i16) -> anyhow::Result<usize> {
+            Ok(MAX_FRAME_SIZE)
+        }
+    }
 
     #[test]
     fn round_trips_request_header_and_body() {
@@ -323,6 +359,12 @@ mod tests {
         assert!(implemented.iter().all(|(key, range)| {
             *key == ApiKey::Produce as i16 || advertised.get(key) == Some(range)
         }));
+    }
+
+    #[test]
+    fn rejects_oversized_response_before_encoding() {
+        let error = encode_response(ApiKey::ApiVersions, 0, 42, &OversizedResponse).unwrap_err();
+        assert!(matches!(error, ProtocolError::ResponseFrameTooLarge(_)));
     }
 
     #[test]

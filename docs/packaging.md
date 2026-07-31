@@ -5,24 +5,24 @@ architectures:
 
 | Distribution family | x86-64 | ARM64 |
 | --- | --- | --- |
-| Debian, Ubuntu | `rutomq_0.1.0_amd64.deb` | `rutomq_0.1.0_arm64.deb` |
-| Fedora, RHEL, Rocky Linux | `rutomq-0.1.0-1.x86_64.rpm` | `rutomq-0.1.0-1.aarch64.rpm` |
+| Debian, Ubuntu | `rutomq_0.1.1_amd64.deb` | `rutomq_0.1.1_arm64.deb` |
+| Fedora, RHEL, Rocky Linux | `rutomq-0.1.1-1.x86_64.rpm` | `rutomq-0.1.1-1.aarch64.rpm` |
 
 ## Install
 
 Download the package for the host architecture from the
-[v0.1.0 release](https://github.com/SamuelSupe/rutomq/releases/tag/v0.1.0).
+[v0.1.1 release](https://github.com/SamuelSupe/rutomq/releases/tag/v0.1.1).
 
 Debian or Ubuntu:
 
 ```bash
-sudo apt install ./rutomq_0.1.0_amd64.deb
+sudo apt install ./rutomq_0.1.1_amd64.deb
 ```
 
 Fedora, RHEL, or Rocky Linux:
 
 ```bash
-sudo dnf install ./rutomq-0.1.0-1.x86_64.rpm
+sudo dnf install ./rutomq-0.1.1-1.x86_64.rpm
 ```
 
 Use `arm64` for a Debian-family ARM host and `aarch64` for an RPM-family ARM

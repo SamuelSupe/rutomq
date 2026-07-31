@@ -9,7 +9,7 @@ on:
       tag:
         description: Existing release tag to package
         required: true
-        default: v0.1.0
+        default: v0.1.1
         type: string
       rebuild_core_assets:
         description: Rebuild the binary archive and Helm chart

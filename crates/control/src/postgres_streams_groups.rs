@@ -86,17 +86,6 @@ pub(crate) async fn describe(
     Ok(descriptions)
 }
 
-pub(crate) async fn ids(pool: &PgPool) -> Result<Vec<String>, ControlError> {
-    Ok(
-        sqlx::query("SELECT group_id FROM streams_protocol_groups ORDER BY group_id")
-            .fetch_all(pool)
-            .await?
-            .into_iter()
-            .map(|row| row.get::<String, _>("group_id"))
-            .collect(),
-    )
-}
-
 pub(crate) async fn validate_member(
     pool: &PgPool,
     group_id: &str,

@@ -48,7 +48,11 @@ async fn handle_as(
     } else {
         AuthorizationContext::authenticated(username, host)
     };
-    broker.dispatch_request(request, &context).await.unwrap()
+    broker
+        .dispatch_request(request, &context)
+        .await
+        .unwrap()
+        .into_bytes()
 }
 
 fn renewer(principal_type: &str, principal_name: &str) -> CreatableRenewers {

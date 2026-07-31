@@ -14,7 +14,7 @@ body:
     attributes:
       label: rutomq version
       description: Release tag or commit SHA
-      placeholder: v0.1.0
+      placeholder: v0.1.1
     validations:
       required: true
   - type: dropdown

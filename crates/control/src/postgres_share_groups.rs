@@ -125,17 +125,6 @@ pub(crate) async fn describe(
     Ok(descriptions)
 }
 
-pub(crate) async fn ids(pool: &PgPool) -> Result<Vec<String>, ControlError> {
-    Ok(
-        sqlx::query("SELECT group_id FROM share_groups ORDER BY group_id")
-            .fetch_all(pool)
-            .await?
-            .into_iter()
-            .map(|row| row.get("group_id"))
-            .collect(),
-    )
-}
-
 pub(crate) async fn lock_group(
     transaction: &mut Transaction<'_, Postgres>,
     group_id: &str,

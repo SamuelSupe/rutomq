@@ -848,7 +848,10 @@ pub async fn expire_transactional_ids(
     Ok(expired.len() as u64)
 }
 
-pub async fn abort_expired(pool: &PgPool) -> Result<u64, ControlError> {
+pub async fn abort_expired(pool: &PgPool, limit: usize) -> Result<u64, ControlError> {
+    if limit == 0 {
+        return Ok(0);
+    }
     let mut transaction = pool.begin().await?;
     // Producer-first ordering matches Produce and EndTxn. Lock every candidate
     // before touching transaction rows so a sweep cannot invert two producers.
@@ -860,8 +863,10 @@ pub async fn abort_expired(pool: &PgPool) -> Result<u64, ControlError> {
            AND NOT tx.two_phase_commit
            AND tx.started_at + tx.timeout_ms * INTERVAL '1 millisecond' <= now()
          ORDER BY p.producer_id
+         LIMIT $1
          FOR UPDATE OF p",
     )
+    .bind(i64::try_from(limit).unwrap_or(i64::MAX))
     .fetch_all(&mut *transaction)
     .await?;
     let transaction_ids = candidates

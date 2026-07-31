@@ -282,6 +282,226 @@ pub(super) fn broker() -> Broker {
     )
 }
 
+#[tokio::test]
+async fn broker_bounds_connections_and_in_flight_request_bytes() {
+    let config = AgentConfig {
+        max_connections: 1,
+        max_frame_size: 16,
+        max_inflight_request_bytes: 32,
+        max_inflight_response_bytes: 32,
+        ..AgentConfig::default()
+    };
+    let broker = Broker::new(
+        Arc::new(MemoryMetadataStore::new()),
+        Arc::new(OpenDalObjectStore::memory().unwrap()),
+        config,
+        Arc::new(Metrics::new().unwrap()),
+    );
+
+    let connection = broker.connection_slots.clone().try_acquire_owned().unwrap();
+    assert!(broker.connection_slots.clone().try_acquire_owned().is_err());
+    drop(connection);
+
+    let request = broker
+        .request_bytes
+        .clone()
+        .try_acquire_many_owned(16)
+        .unwrap();
+    let concurrent_request = broker
+        .request_bytes
+        .clone()
+        .try_acquire_many_owned(16)
+        .unwrap();
+    assert!(broker.request_bytes.clone().try_acquire_owned().is_err());
+    drop(concurrent_request);
+    drop(request);
+
+    let response = broker
+        .response_bytes
+        .clone()
+        .try_acquire_many_owned(16)
+        .unwrap();
+    let concurrent_response = broker
+        .response_bytes
+        .clone()
+        .try_acquire_many_owned(16)
+        .unwrap();
+    assert!(broker.response_bytes.clone().try_acquire_owned().is_err());
+    drop(concurrent_response);
+    drop(response);
+}
+
+#[tokio::test]
+async fn incomplete_frame_releases_request_memory_after_read_timeout() {
+    let config = AgentConfig {
+        max_frame_size: 16,
+        max_inflight_request_bytes: 32,
+        connection_io_timeout: Duration::from_millis(25),
+        ..AgentConfig::default()
+    };
+    let broker = Broker::new(
+        Arc::new(MemoryMetadataStore::new()),
+        Arc::new(OpenDalObjectStore::memory().unwrap()),
+        config,
+        Arc::new(Metrics::new().unwrap()),
+    );
+    let (mut client, server) = tokio::io::duplex(64);
+    let (_shutdown, receiver) = watch::channel(false);
+    let connection = {
+        let broker = broker.clone();
+        tokio::spawn(async move {
+            broker
+                .serve_connection(server, "127.0.0.1:19092".parse().unwrap(), receiver)
+                .await
+        })
+    };
+
+    client.write_i32(16).await.unwrap();
+    for _ in 0..100 {
+        if broker.request_bytes.available_permits() == 16 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(broker.request_bytes.available_permits(), 16);
+    let concurrent_request = broker
+        .request_bytes
+        .clone()
+        .try_acquire_many_owned(16)
+        .unwrap();
+    drop(concurrent_request);
+
+    let error = tokio::time::timeout(Duration::from_secs(1), connection)
+        .await
+        .expect("incomplete frame must time out")
+        .unwrap()
+        .unwrap_err();
+    assert!(error.to_string().contains("frame body read timed out"));
+    assert_eq!(broker.request_bytes.available_permits(), 32);
+}
+
+#[tokio::test]
+async fn unread_response_releases_the_connection_after_io_timeout() {
+    let broker = Broker::new(
+        Arc::new(MemoryMetadataStore::new()),
+        Arc::new(OpenDalObjectStore::memory().unwrap()),
+        AgentConfig {
+            connection_io_timeout: Duration::from_millis(25),
+            ..AgentConfig::default()
+        },
+        Arc::new(Metrics::new().unwrap()),
+    );
+    let (mut client, server) = tokio::io::duplex(64);
+    let (_shutdown, receiver) = watch::channel(false);
+    let connection = tokio::spawn(async move {
+        broker
+            .serve_connection(server, "127.0.0.1:19092".parse().unwrap(), receiver)
+            .await
+    });
+    let request = ApiVersionsRequest::default();
+    write_sized_packet(
+        &mut client,
+        &request_frame(ApiKey::ApiVersions, 0, 1, &request),
+    )
+    .await
+    .unwrap();
+
+    let error = tokio::time::timeout(Duration::from_secs(1), connection)
+        .await
+        .expect("unread response must time out")
+        .unwrap()
+        .unwrap_err();
+    assert!(error.to_string().contains("response write timed out"));
+}
+
+#[tokio::test]
+async fn response_memory_budget_exhaustion_closes_the_connection() {
+    let broker = Broker::new(
+        Arc::new(MemoryMetadataStore::new()),
+        Arc::new(OpenDalObjectStore::memory().unwrap()),
+        AgentConfig {
+            max_inflight_response_bytes: 1,
+            ..AgentConfig::default()
+        },
+        Arc::new(Metrics::new().unwrap()),
+    );
+    let (mut client, server) = tokio::io::duplex(4096);
+    let (_shutdown, receiver) = watch::channel(false);
+    let connection = tokio::spawn(async move {
+        broker
+            .serve_connection(server, "127.0.0.1:19092".parse().unwrap(), receiver)
+            .await
+    });
+    let request = ApiVersionsRequest::default();
+    write_sized_packet(
+        &mut client,
+        &request_frame(ApiKey::ApiVersions, 0, 1, &request),
+    )
+    .await
+    .unwrap();
+
+    let error = tokio::time::timeout(Duration::from_secs(1), connection)
+        .await
+        .expect("response budget exhaustion must close the connection")
+        .unwrap()
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("response memory budget exhausted")
+    );
+}
+
+struct EncodeMustNotRun;
+
+impl Encodable for EncodeMustNotRun {
+    fn encode<B: kafka_protocol::protocol::buf::ByteBufMut>(
+        &self,
+        _buffer: &mut B,
+        _version: i16,
+    ) -> anyhow::Result<()> {
+        panic!("response encoding must happen after memory reservation")
+    }
+
+    fn compute_size(&self, _version: i16) -> anyhow::Result<usize> {
+        Ok(1)
+    }
+}
+
+#[tokio::test]
+async fn response_memory_is_reserved_before_encoding() {
+    let exhausted_broker = Broker::new(
+        Arc::new(MemoryMetadataStore::new()),
+        Arc::new(OpenDalObjectStore::memory().unwrap()),
+        AgentConfig {
+            max_inflight_response_bytes: 1,
+            ..AgentConfig::default()
+        },
+        Arc::new(Metrics::new().unwrap()),
+    );
+
+    let error = match exhausted_broker.encode_response(ApiKey::ApiVersions, 0, 1, &EncodeMustNotRun)
+    {
+        Ok(_) => panic!("response budget should be exhausted"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("response memory budget exhausted")
+    );
+
+    let holding_broker = broker();
+    let available = holding_broker.response_bytes.available_permits();
+    let response = holding_broker
+        .encode_response(ApiKey::ApiVersions, 0, 1, &ApiVersionsResponse::default())
+        .unwrap()
+        .into_bytes();
+    assert!(holding_broker.response_bytes.available_permits() < available);
+    drop(response);
+    assert_eq!(holding_broker.response_bytes.available_permits(), available);
+}
+
 fn sasl_broker() -> Broker {
     sasl_broker_with_max_reauth(0)
 }

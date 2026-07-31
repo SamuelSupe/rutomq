@@ -20,6 +20,10 @@ data:
   RUTOMQ_AUTO_CREATE_TOPICS_ENABLE: {{ .Values.cluster.autoCreateTopicsEnable | quote }}
   RUTOMQ_FLUSH_INTERVAL_MS: {{ .Values.agent.flushIntervalMs | quote }}
   RUTOMQ_MAX_BATCH_BYTES: {{ .Values.agent.maxBatchBytes | int64 | quote }}
+  RUTOMQ_MAX_CONNECTIONS: {{ .Values.agent.maxConnections | int64 | quote }}
+  RUTOMQ_MAX_INFLIGHT_REQUEST_BYTES: {{ .Values.agent.maxInflightRequestBytes | int64 | quote }}
+  RUTOMQ_MAX_INFLIGHT_RESPONSE_BYTES: {{ .Values.agent.maxInflightResponseBytes | int64 | quote }}
+  RUTOMQ_CONNECTION_IO_TIMEOUT_MS: {{ .Values.agent.connectionIoTimeoutMs | quote }}
   RUTOMQ_MAX_REQUEST_PARTITION_SIZE_LIMIT: {{ .Values.agent.maxRequestPartitionSizeLimit | quote }}
   RUTOMQ_FETCH_CACHE_BYTES: {{ .Values.agent.fetchCacheBytes | int64 | quote }}
   RUTOMQ_OBSERVABILITY_INTERVAL_MS: {{ .Values.agent.observabilityIntervalMs | quote }}

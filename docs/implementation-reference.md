@@ -418,6 +418,25 @@ for the three dynamic Kafka broker settings and default to `true`.
 fallbacks (default: 1048588, minimum: 524288). Kafka Admin can override either
 cluster-wide; rutomq persists the values in PostgreSQL but retains no
 coordinator append buffers.
+`RUTOMQ_MAX_CONNECTIONS` bounds active Kafka connections per Agent (default:
+1024). Request bodies share `RUTOMQ_MAX_INFLIGHT_REQUEST_BYTES` (default:
+268435456), which must leave room for at least two maximum-size frames.
+Encoded responses share `RUTOMQ_MAX_INFLIGHT_RESPONSE_BYTES` (default:
+268435456), which must hold at least two 64 MiB response frames. Connections
+are closed instead of queued when either memory budget is exhausted. Response
+encoding rejects payloads above 64 MiB before allocating their wire buffers.
+`RUTOMQ_CONNECTION_IO_TIMEOUT_MS` (default: 30000) bounds frame-header reads,
+frame-body reads, and response writes, so incomplete or non-reading clients
+cannot retain connection slots, request memory, or response buffers
+indefinitely. The Admin HTTP listener separately caps active connections at 64
+and uses the same timeout as its maximum connection lifetime.
+Orphan-object discovery streams object-store listings and advances through at
+most 1000 objects per sweep. The cursor wraps after reaching the end, bounding
+each GC cycle's memory and metadata-store load as the bucket grows.
+Retention likewise advances through at most 64 partitions, 1000 spans, and
+1000 object deletions per sweep, then resumes from its partition and object
+cursors. Transaction timeout maintenance aborts at most 1000 expired
+transactions per sweep.
 `RUTOMQ_STREAMS_GROUP_HEARTBEAT_INTERVAL_MS`,
 `RUTOMQ_STREAMS_GROUP_MIN_HEARTBEAT_INTERVAL_MS`,
 `RUTOMQ_STREAMS_GROUP_MAX_HEARTBEAT_INTERVAL_MS`,
@@ -599,7 +618,8 @@ zero, delayed cleanup may exceed 100, and no local-retention metric is exposed
 because Agents have no local log tier. The interval defaults to 15 seconds;
 `RUTOMQ_OBSERVABILITY_MAX_GROUPS` (1000),
 `RUTOMQ_CONSUMER_LAG_MAX_SERIES` (10000), and
-`RUTOMQ_PARTITION_RETENTION_MAX_SERIES` (10000) cap label cardinality.
+`RUTOMQ_PARTITION_RETENTION_MAX_SERIES` (10000) cap label cardinality and the
+corresponding PostgreSQL result sets.
 Collection errors and truncation are explicit metrics, and a failed refresh
 keeps the previous snapshot. These are cluster-wide gauges repeated by each
 Agent, so Prometheus queries should group by Agent instead of summing replicas.

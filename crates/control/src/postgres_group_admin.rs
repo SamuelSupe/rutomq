@@ -4,15 +4,35 @@ use sqlx::{PgPool, Row};
 use std::collections::{BTreeMap, HashMap};
 
 pub(crate) async fn list(pool: &PgPool) -> Result<Vec<GroupSummary>, ControlError> {
+    list_limited(pool, usize::MAX).await
+}
+
+pub(crate) async fn list_limited(
+    pool: &PgPool,
+    limit: usize,
+) -> Result<Vec<GroupSummary>, ControlError> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
     let mut groups = BTreeMap::new();
     for row in sqlx::query(
-        "SELECT g.group_id, g.protocol_type, g.classic_rebalance_pending,
+        "WITH selected AS (
+             SELECT group_id
+             FROM consumer_groups
+             ORDER BY group_id
+             LIMIT $1
+         )
+         SELECT g.group_id, g.protocol_type, g.classic_rebalance_pending,
                 COUNT(m.member_id)::BIGINT AS member_count,
                 COUNT(m.assignment)::BIGINT AS assignment_count
-         FROM consumer_groups g
+         FROM selected s
+         JOIN consumer_groups g ON g.group_id = s.group_id
          LEFT JOIN consumer_group_members m ON m.group_id = g.group_id
-         GROUP BY g.group_id, g.protocol_type, g.classic_rebalance_pending",
+         GROUP BY g.group_id, g.protocol_type, g.classic_rebalance_pending
+         ORDER BY g.group_id",
     )
+    .bind(limit)
     .fetch_all(pool)
     .await?
     {
@@ -35,12 +55,15 @@ pub(crate) async fn list(pool: &PgPool) -> Result<Vec<GroupSummary>, ControlErro
         );
     }
 
-    let consumer_ids = sqlx::query("SELECT group_id FROM consumer_protocol_groups")
-        .fetch_all(pool)
-        .await?
-        .into_iter()
-        .map(|row| row.get::<String, _>("group_id"))
-        .collect::<Vec<_>>();
+    let consumer_ids = limited_ids(
+        pool,
+        "SELECT group_id
+         FROM consumer_protocol_groups
+         ORDER BY group_id
+         LIMIT $1",
+        limit,
+    )
+    .await?;
     for description in super::postgres_consumer_groups::describe(pool, &consumer_ids)
         .await?
         .into_values()
@@ -56,7 +79,15 @@ pub(crate) async fn list(pool: &PgPool) -> Result<Vec<GroupSummary>, ControlErro
         );
     }
 
-    let streams_ids = super::postgres_streams_groups::ids(pool).await?;
+    let streams_ids = limited_ids(
+        pool,
+        "SELECT group_id
+         FROM streams_protocol_groups
+         ORDER BY group_id
+         LIMIT $1",
+        limit,
+    )
+    .await?;
     for description in super::postgres_streams_groups::describe(pool, &streams_ids)
         .await?
         .into_values()
@@ -72,7 +103,15 @@ pub(crate) async fn list(pool: &PgPool) -> Result<Vec<GroupSummary>, ControlErro
         );
     }
 
-    let share_ids = super::postgres_share_groups::ids(pool).await?;
+    let share_ids = limited_ids(
+        pool,
+        "SELECT group_id
+         FROM share_groups
+         ORDER BY group_id
+         LIMIT $1",
+        limit,
+    )
+    .await?;
     for description in super::postgres_share_groups::describe(pool, &share_ids)
         .await?
         .into_values()
@@ -88,9 +127,15 @@ pub(crate) async fn list(pool: &PgPool) -> Result<Vec<GroupSummary>, ControlErro
         );
     }
 
-    for row in sqlx::query("SELECT DISTINCT group_id FROM consumer_offsets")
-        .fetch_all(pool)
-        .await?
+    for row in sqlx::query(
+        "SELECT DISTINCT group_id
+         FROM consumer_offsets
+         ORDER BY group_id
+         LIMIT $1",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?
     {
         let group_id: String = row.get("group_id");
         groups.entry(group_id.clone()).or_insert(GroupSummary {
@@ -100,7 +145,20 @@ pub(crate) async fn list(pool: &PgPool) -> Result<Vec<GroupSummary>, ControlErro
             group_type: "Classic".to_owned(),
         });
     }
-    Ok(groups.into_values().collect())
+    Ok(groups
+        .into_values()
+        .take(usize::try_from(limit).unwrap_or(usize::MAX))
+        .collect())
+}
+
+async fn limited_ids(pool: &PgPool, query: &str, limit: i64) -> Result<Vec<String>, ControlError> {
+    Ok(sqlx::query(query)
+        .bind(limit)
+        .fetch_all(pool)
+        .await?
+        .into_iter()
+        .map(|row| row.get::<String, _>("group_id"))
+        .collect())
 }
 
 pub(crate) async fn describe_classic(

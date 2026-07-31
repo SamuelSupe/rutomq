@@ -21,6 +21,10 @@ pub struct AgentConfig {
     pub flush_interval: Duration,
     pub max_batch_bytes: usize,
     pub max_frame_size: usize,
+    pub max_inflight_request_bytes: usize,
+    pub max_inflight_response_bytes: usize,
+    pub connection_io_timeout: Duration,
+    pub max_connections: usize,
     pub max_fetch_bytes: usize,
     pub max_request_partition_size_limit: i32,
     pub fetch_cache_bytes: usize,
@@ -202,6 +206,10 @@ impl Default for AgentConfig {
             flush_interval: Duration::from_millis(250),
             max_batch_bytes: 8 * 1024 * 1024,
             max_frame_size: rutomq_protocol::MAX_FRAME_SIZE,
+            max_inflight_request_bytes: 4 * rutomq_protocol::MAX_FRAME_SIZE,
+            max_inflight_response_bytes: 4 * rutomq_protocol::MAX_FRAME_SIZE,
+            connection_io_timeout: Duration::from_secs(30),
+            max_connections: 1_024,
             max_fetch_bytes: 16 * 1024 * 1024,
             max_request_partition_size_limit: 2_000,
             fetch_cache_bytes: 256 * 1024 * 1024,
@@ -724,6 +732,32 @@ impl AgentConfig {
         }
         let fetch_cache_bytes =
             env_parse_result("RUTOMQ_FETCH_CACHE_BYTES", defaults.fetch_cache_bytes)?;
+        let max_frame_size = env_parse_result("RUTOMQ_MAX_FRAME_SIZE", defaults.max_frame_size)?;
+        if !(1..=i32::MAX as usize).contains(&max_frame_size) {
+            bail!("RUTOMQ_MAX_FRAME_SIZE must be between 1 and 2147483647");
+        }
+        let max_inflight_request_bytes = env_parse_result(
+            "RUTOMQ_MAX_INFLIGHT_REQUEST_BYTES",
+            defaults.max_inflight_request_bytes,
+        )?;
+        let max_inflight_response_bytes = env_parse_result(
+            "RUTOMQ_MAX_INFLIGHT_RESPONSE_BYTES",
+            defaults.max_inflight_response_bytes,
+        )?;
+        let connection_io_timeout_ms = env_parse_result(
+            "RUTOMQ_CONNECTION_IO_TIMEOUT_MS",
+            defaults.connection_io_timeout.as_millis() as u64,
+        )?;
+        validate_io_resource_limits(
+            max_frame_size,
+            max_inflight_request_bytes,
+            max_inflight_response_bytes,
+            connection_io_timeout_ms,
+        )?;
+        let max_connections = env_parse_result("RUTOMQ_MAX_CONNECTIONS", defaults.max_connections)?;
+        if max_connections == 0 || max_connections > tokio::sync::Semaphore::MAX_PERMITS {
+            bail!("RUTOMQ_MAX_CONNECTIONS is outside the supported range");
+        }
         let max_request_partition_size_limit = env_parse_result(
             "RUTOMQ_MAX_REQUEST_PARTITION_SIZE_LIMIT",
             defaults.max_request_partition_size_limit,
@@ -755,8 +789,8 @@ impl AgentConfig {
             bail!("observability interval and metric cardinality bounds must be positive");
         }
         Ok(Self {
-            kafka_addr: env_addr("KAFKA_LISTEN_ADDR", defaults.kafka_addr),
-            admin_addr: env_addr("ADMIN_LISTEN_ADDR", defaults.admin_addr),
+            kafka_addr: env_addr("KAFKA_LISTEN_ADDR", defaults.kafka_addr)?,
+            admin_addr: env_addr("ADMIN_LISTEN_ADDR", defaults.admin_addr)?,
             advertise_host: env_string("KAFKA_ADVERTISE_HOST", defaults.advertise_host),
             advertise_port: env_parse("KAFKA_ADVERTISE_PORT", defaults.advertise_port),
             cluster_id: env_string("RUTOMQ_CLUSTER_ID", defaults.cluster_id),
@@ -772,7 +806,11 @@ impl AgentConfig {
                 defaults.flush_interval.as_millis() as u64,
             )),
             max_batch_bytes: env_parse("RUTOMQ_MAX_BATCH_BYTES", defaults.max_batch_bytes),
-            max_frame_size: env_parse("RUTOMQ_MAX_FRAME_SIZE", defaults.max_frame_size),
+            max_frame_size,
+            max_inflight_request_bytes,
+            max_inflight_response_bytes,
+            connection_io_timeout: Duration::from_millis(connection_io_timeout_ms),
+            max_connections,
             max_fetch_bytes: env_parse("RUTOMQ_MAX_FETCH_BYTES", defaults.max_fetch_bytes),
             max_request_partition_size_limit,
             fetch_cache_bytes,
@@ -1089,6 +1127,39 @@ fn validate_group_max_size(protocol: &str, value: i32, hard_maximum: i32) -> Res
     Ok(())
 }
 
+fn validate_io_resource_limits(
+    max_frame_size: usize,
+    max_inflight_request_bytes: usize,
+    max_inflight_response_bytes: usize,
+    connection_io_timeout_ms: u64,
+) -> Result<()> {
+    let minimum_request_budget = max_frame_size
+        .checked_mul(2)
+        .context("RUTOMQ_MAX_FRAME_SIZE is too large for the request memory budget")?;
+    if !(minimum_request_budget..=tokio::sync::Semaphore::MAX_PERMITS)
+        .contains(&max_inflight_request_bytes)
+    {
+        bail!(
+            "RUTOMQ_MAX_INFLIGHT_REQUEST_BYTES must be at least twice RUTOMQ_MAX_FRAME_SIZE and within the supported semaphore range"
+        );
+    }
+    let minimum_response_budget = rutomq_protocol::MAX_FRAME_SIZE
+        .checked_add(4)
+        .and_then(|size| size.checked_mul(2))
+        .context("Kafka response frame size is too large for the response memory budget")?;
+    if !(minimum_response_budget..=tokio::sync::Semaphore::MAX_PERMITS)
+        .contains(&max_inflight_response_bytes)
+    {
+        bail!(
+            "RUTOMQ_MAX_INFLIGHT_RESPONSE_BYTES must hold at least two maximum-size response frames and remain within the supported semaphore range"
+        );
+    }
+    if connection_io_timeout_ms == 0 {
+        bail!("RUTOMQ_CONNECTION_IO_TIMEOUT_MS must be positive");
+    }
+    Ok(())
+}
+
 fn validate_consumer_group_assignors(assignors: &[String]) -> Result<()> {
     let mut seen = HashSet::new();
     if assignors.is_empty()
@@ -1159,10 +1230,13 @@ where
         .unwrap_or(default)
 }
 
-fn env_addr(name: &str, default: SocketAddr) -> SocketAddr {
-    env_string(name, default.to_string())
-        .parse()
-        .unwrap_or(default)
+fn env_addr(name: &str, default: SocketAddr) -> Result<SocketAddr> {
+    match std::env::var(name) {
+        Ok(value) => value
+            .parse()
+            .with_context(|| format!("{name} has an invalid socket address")),
+        Err(_) => Ok(default),
+    }
 }
 
 fn env_path(name: &str) -> Option<PathBuf> {
@@ -1190,9 +1264,10 @@ mod tests {
     use super::{
         validate_classic_group_session_timeout_bounds, validate_consumer_group_assignors,
         validate_consumer_regex_refresh_interval, validate_group_max_size,
-        validate_group_timeout_bounds, validate_offset_retention, validate_sasl_max_reauth_ms,
-        validate_share_group_assignors, validate_share_record_lock_duration,
-        validate_streams_standby_replicas, validate_topic_creation_defaults,
+        validate_group_timeout_bounds, validate_io_resource_limits, validate_offset_retention,
+        validate_sasl_max_reauth_ms, validate_share_group_assignors,
+        validate_share_record_lock_duration, validate_streams_standby_replicas,
+        validate_topic_creation_defaults,
     };
 
     #[test]
@@ -1278,6 +1353,15 @@ mod tests {
         assert!(validate_group_max_size("share", 200, 1_000).is_ok());
         assert!(validate_group_max_size("share", 1_000, 1_000).is_ok());
         assert!(validate_group_max_size("share", 1_001, 1_000).is_err());
+    }
+
+    #[test]
+    fn io_resource_limits_require_headroom_and_a_finite_timeout() {
+        let response_budget = 2 * (rutomq_protocol::MAX_FRAME_SIZE + 4);
+        assert!(validate_io_resource_limits(16, 32, response_budget, 1).is_ok());
+        assert!(validate_io_resource_limits(16, 31, response_budget, 1).is_err());
+        assert!(validate_io_resource_limits(16, 32, response_budget - 1, 1).is_err());
+        assert!(validate_io_resource_limits(16, 32, response_budget, 0).is_err());
     }
 
     #[test]

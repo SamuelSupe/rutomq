@@ -103,7 +103,7 @@ pub use groups::{
     LeaveGroupMemberResult,
 };
 pub use observability::{ConsumerLag, PartitionRetentionSize, TransactionStateCounts};
-pub use retention::{RetentionResult, TopicConfig};
+pub use retention::{RetentionPage, RetentionResult, TopicConfig};
 pub use scram_credentials::{ScramCredential, ScramCredentialAlteration};
 pub use share_groups::{
     SHARE_GROUP_ASSIGNOR, ShareGroupDescription, ShareGroupHeartbeat, ShareGroupHeartbeatResult,
@@ -715,6 +715,15 @@ pub trait MetadataStore: Send + Sync {
         key: &ShareStateKey,
     ) -> Result<Option<ShareStateSummary>, ControlError>;
     async fn list_groups(&self) -> Result<Vec<GroupSummary>, ControlError>;
+    async fn list_groups_limited(&self, limit: usize) -> Result<Vec<GroupSummary>, ControlError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut groups = self.list_groups().await?;
+        groups.sort_by(|left, right| left.group_id.cmp(&right.group_id));
+        groups.truncate(limit);
+        Ok(groups)
+    }
     async fn describe_classic_groups(
         &self,
         group_ids: &[String],
@@ -928,6 +937,25 @@ pub trait MetadataStore: Send + Sync {
         &self,
         now_ms: i64,
         object_delete_grace_ms: i64,
+    ) -> Result<RetentionResult, ControlError> {
+        self.apply_retention_page(
+            now_ms,
+            object_delete_grace_ms,
+            RetentionPage {
+                start_after_partition: None,
+                start_after_object: None,
+                max_partitions: usize::MAX,
+                max_spans: usize::MAX,
+                max_objects: usize::MAX,
+            },
+        )
+        .await
+    }
+    async fn apply_retention_page(
+        &self,
+        now_ms: i64,
+        object_delete_grace_ms: i64,
+        page: RetentionPage<'_>,
     ) -> Result<RetentionResult, ControlError>;
     async fn complete_object_deletion(&self, key: &str) -> Result<bool, ControlError>;
     async fn claim_compaction(
@@ -948,6 +976,12 @@ pub trait MetadataStore: Send + Sync {
         lease_id: Uuid,
     ) -> Result<(), ControlError>;
     async fn abort_expired_transactions(&self) -> Result<u64, ControlError>;
+    async fn abort_expired_transactions_batch(&self, limit: usize) -> Result<u64, ControlError> {
+        if limit == 0 {
+            return Ok(0);
+        }
+        self.abort_expired_transactions().await
+    }
     async fn claim_stale_objects(
         &self,
         before_ms: i64,
@@ -4373,10 +4407,11 @@ impl MetadataStore for MemoryMetadataStore {
         ))
     }
 
-    async fn apply_retention(
+    async fn apply_retention_page(
         &self,
         now_ms: i64,
         object_delete_grace_ms: i64,
+        page: RetentionPage<'_>,
     ) -> Result<RetentionResult, ControlError> {
         let mut state = self.state.write().await;
         let ongoing_transactions = state
@@ -4387,23 +4422,56 @@ impl MetadataStore for MemoryMetadataStore {
             })
             .collect::<HashSet<_>>();
         let configs = state.topic_configs.clone();
+        let partition_limit = page.max_partitions.max(1);
+        let span_limit = page.max_spans.max(1);
+        let object_limit = page.max_objects.max(1);
+        let mut partitions = state
+            .partitions
+            .keys()
+            .filter(|partition| {
+                page.start_after_partition.is_none_or(|cursor| {
+                    (partition.topic.as_str(), partition.partition)
+                        > (cursor.topic.as_str(), cursor.partition)
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        partitions.sort_by(|left, right| {
+            left.topic
+                .cmp(&right.topic)
+                .then_with(|| left.partition.cmp(&right.partition))
+        });
+        partitions.truncate(partition_limit.saturating_add(1));
+        let has_more_partitions = partitions.len() > partition_limit;
+        partitions.truncate(partition_limit);
+        let selected_partition_count = partitions.len();
         let mut removed_spans = 0u64;
         let mut deferred_objects = Vec::new();
         let mut truncated_partitions = Vec::new();
-        for (partition, log) in &mut state.partitions {
+        let mut processed_partitions = Vec::new();
+        for partition in partitions {
+            if removed_spans >= span_limit as u64 {
+                break;
+            }
+            processed_partitions.push(partition.clone());
             let Some(config) = configs.get(&partition.topic) else {
                 continue;
             };
             if !config.deletes_records() {
                 continue;
             }
+            let Some(log) = state.partitions.get_mut(&partition) else {
+                continue;
+            };
             let mut retained_bytes = log
                 .spans
                 .iter()
                 .map(|span| span.byte_end.saturating_sub(span.byte_start))
                 .sum::<u64>();
             let mut remove_count = 0usize;
-            for span in &log.spans {
+            let remaining_spans =
+                span_limit.saturating_sub(usize::try_from(removed_spans).unwrap_or(usize::MAX));
+            for span in log.spans.iter().take(remaining_spans) {
                 if span
                     .transaction_id
                     .is_some_and(|transaction_id| ongoing_transactions.contains(&transaction_id))
@@ -4476,14 +4544,30 @@ impl MetadataStore for MemoryMetadataStore {
                     .object_delete_after
                     .get(object_key)
                     .is_none_or(|delete_after| now_ms >= *delete_after);
-                (now_ms.saturating_sub(*unreferenced_at) >= grace_ms && policy_elapsed)
-                    .then_some(object_key.clone())
+                (now_ms.saturating_sub(*unreferenced_at) >= grace_ms
+                    && policy_elapsed
+                    && page
+                        .start_after_object
+                        .is_none_or(|cursor| object_key.as_str() > cursor))
+                .then_some(object_key.clone())
             })
             .collect::<Vec<_>>();
         deletable_objects.sort();
+        deletable_objects.truncate(object_limit.saturating_add(1));
+        let next_object = (deletable_objects.len() > object_limit)
+            .then(|| deletable_objects[object_limit - 1].clone());
+        deletable_objects.truncate(object_limit);
+        let next_partition =
+            if has_more_partitions || processed_partitions.len() < selected_partition_count {
+                processed_partitions.last().cloned()
+            } else {
+                None
+            };
         Ok(RetentionResult {
             removed_spans,
             deletable_objects,
+            next_partition,
+            next_object,
         })
     }
 
@@ -4529,9 +4613,16 @@ impl MetadataStore for MemoryMetadataStore {
     }
 
     async fn abort_expired_transactions(&self) -> Result<u64, ControlError> {
+        self.abort_expired_transactions_batch(usize::MAX).await
+    }
+
+    async fn abort_expired_transactions_batch(&self, limit: usize) -> Result<u64, ControlError> {
+        if limit == 0 {
+            return Ok(0);
+        }
         let mut state = self.state.write().await;
         let now = Utc::now();
-        let expired = state
+        let mut expired = state
             .transactions
             .iter()
             .filter_map(|(transaction_id, transaction)| {
@@ -4541,7 +4632,10 @@ impl MetadataStore for MemoryMetadataStore {
                         .is_some_and(|expires_at| expires_at <= now))
                 .then_some(*transaction_id)
             })
-            .collect::<HashSet<_>>();
+            .collect::<Vec<_>>();
+        expired.sort_unstable();
+        expired.truncate(limit);
+        let expired = expired.into_iter().collect::<HashSet<_>>();
         for transaction_id in &expired {
             state
                 .transactions
@@ -6509,6 +6603,10 @@ impl MetadataStore for PostgresMetadataStore {
         postgres_group_admin::list(&self.pool).await
     }
 
+    async fn list_groups_limited(&self, limit: usize) -> Result<Vec<GroupSummary>, ControlError> {
+        postgres_group_admin::list_limited(&self.pool, limit).await
+    }
+
     async fn describe_classic_groups(
         &self,
         group_ids: &[String],
@@ -6930,12 +7028,13 @@ impl MetadataStore for PostgresMetadataStore {
         .await
     }
 
-    async fn apply_retention(
+    async fn apply_retention_page(
         &self,
         now_ms: i64,
         object_delete_grace_ms: i64,
+        page: RetentionPage<'_>,
     ) -> Result<RetentionResult, ControlError> {
-        postgres_retention::apply(&self.pool, now_ms, object_delete_grace_ms).await
+        postgres_retention::apply_page(&self.pool, now_ms, object_delete_grace_ms, page).await
     }
 
     async fn complete_object_deletion(&self, key: &str) -> Result<bool, ControlError> {
@@ -6969,7 +7068,11 @@ impl MetadataStore for PostgresMetadataStore {
     }
 
     async fn abort_expired_transactions(&self) -> Result<u64, ControlError> {
-        postgres_transactions::abort_expired(&self.pool).await
+        self.abort_expired_transactions_batch(usize::MAX).await
+    }
+
+    async fn abort_expired_transactions_batch(&self, limit: usize) -> Result<u64, ControlError> {
+        postgres_transactions::abort_expired(&self.pool, limit).await
     }
 
     async fn claim_stale_objects(

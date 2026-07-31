@@ -4,13 +4,15 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::warn;
 
+const SWEEP_LIMIT: usize = 1_000;
+
 pub fn spawn(metadata: Arc<dyn MetadataStore>, metrics: Arc<Metrics>, cleanup_interval: Duration) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(cleanup_interval);
         interval.tick().await;
         loop {
             interval.tick().await;
-            match metadata.abort_expired_transactions().await {
+            match metadata.abort_expired_transactions_batch(SWEEP_LIMIT).await {
                 Ok(expired) if expired > 0 => {
                     metrics.expired_transactions.inc_by(expired);
                 }

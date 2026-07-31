@@ -10,8 +10,8 @@ use kafka_protocol::messages::produce_request::{PartitionProduceData, TopicProdu
 use rutomq_control::MemoryMetadataStore;
 use rutomq_protocol::records::{Record, TimestampType};
 use rutomq_storage::{
-    MIN_S3_MULTIPART_CHUNK_BYTES, ObjectMetadata, ObjectStore, OpenDalObjectStore, S3Config,
-    StorageError,
+    MIN_S3_MULTIPART_CHUNK_BYTES, ObjectMetadata, ObjectStore, ObjectStream, OpenDalObjectStore,
+    S3Config, StorageError,
 };
 use std::ops::Range;
 
@@ -38,8 +38,12 @@ impl ObjectStore for CorruptingStore {
         self.inner.head(key).await
     }
 
-    async fn list(&self, prefix: &str) -> Result<Vec<ObjectMetadata>, StorageError> {
-        self.inner.list(prefix).await
+    async fn list_stream(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+    ) -> Result<ObjectStream, StorageError> {
+        self.inner.list_stream(prefix, start_after).await
     }
 
     async fn delete(&self, key: &str) -> Result<(), StorageError> {

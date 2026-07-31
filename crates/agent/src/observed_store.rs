@@ -1,7 +1,8 @@
 use crate::Metrics;
 use async_trait::async_trait;
 use bytes::Bytes;
-use rutomq_storage::{ObjectMetadata, ObjectStore, StorageError};
+use futures_util::StreamExt;
+use rutomq_storage::{ObjectMetadata, ObjectStore, ObjectStream, StorageError};
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::Instant;
@@ -78,6 +79,25 @@ impl ObjectStore for ObservedObjectStore {
         let result = self.inner.list(prefix).await;
         self.record("list", started, 0, &result);
         result
+    }
+
+    async fn list_stream(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+    ) -> Result<ObjectStream, StorageError> {
+        let started = Instant::now();
+        let result = self.inner.list_stream(prefix, start_after).await;
+        self.record("list", started, 0, &result);
+        let metrics = self.metrics.clone();
+        Ok(Box::pin(result?.inspect(move |entry| {
+            if entry.is_err() {
+                metrics
+                    .object_store_errors
+                    .with_label_values(&["list"])
+                    .inc();
+            }
+        })))
     }
 
     async fn delete(&self, key: &str) -> Result<(), StorageError> {

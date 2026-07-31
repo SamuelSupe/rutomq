@@ -2138,6 +2138,33 @@ async fn memory_store_aborts_expired_transactions() {
 }
 
 #[tokio::test]
+async fn memory_store_bounds_expired_transaction_batches() {
+    let store = MemoryMetadataStore::new();
+    store.create_topic("events", 1).await.unwrap();
+    let partition = PartitionKey::new("events", 0);
+    for transactional_id in ["expiring-tx-a", "expiring-tx-b"] {
+        let producer = store
+            .init_producer(Some(transactional_id), 1, None)
+            .await
+            .unwrap();
+        store
+            .add_partitions_to_transaction(
+                transactional_id,
+                producer,
+                std::slice::from_ref(&partition),
+                false,
+            )
+            .await
+            .unwrap();
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+
+    assert_eq!(store.abort_expired_transactions_batch(1).await.unwrap(), 1);
+    assert_eq!(store.abort_expired_transactions_batch(1).await.unwrap(), 1);
+    assert_eq!(store.abort_expired_transactions_batch(1).await.unwrap(), 0);
+}
+
+#[tokio::test]
 async fn memory_store_describes_and_filters_transactions() {
     let store = MemoryMetadataStore::new();
     store.create_topic("events", 1).await.unwrap();
@@ -2336,6 +2363,133 @@ async fn memory_retention_preserves_shared_objects_until_every_span_expires() {
             .await
             .unwrap()
     );
+}
+
+#[tokio::test]
+async fn memory_retention_pages_partitions_and_bounds_removed_spans() {
+    let store = MemoryMetadataStore::new();
+    for topic in ["retention-a", "retention-b"] {
+        store.create_topic(topic, 1).await.unwrap();
+        store
+            .set_topic_config(
+                topic,
+                TopicConfig {
+                    retention_ms: 0,
+                    file_delete_delay_ms: 0,
+                    ..TopicConfig::default()
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .commit_object(
+                ObjectRef {
+                    key: format!("objects/{topic}"),
+                    size: 10,
+                },
+                vec![BatchDraft {
+                    partition: PartitionKey::new(topic, 0),
+                    byte_start: 0,
+                    byte_end: 10,
+                    record_count: 1,
+                    timestamp_ms: 1,
+                    checksum: None,
+                    producer: None,
+                    transactional_id: None,
+                    verify_transaction_partition: true,
+                }],
+            )
+            .await
+            .unwrap();
+    }
+
+    let first = store
+        .apply_retention_page(
+            10,
+            100,
+            RetentionPage {
+                start_after_partition: None,
+                start_after_object: None,
+                max_partitions: 1,
+                max_spans: 1,
+                max_objects: 1,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.removed_spans, 1);
+    assert_eq!(
+        first.next_partition,
+        Some(PartitionKey::new("retention-a", 0))
+    );
+    assert_eq!(
+        store
+            .list_offset(&PartitionKey::new("retention-b", 0), -2)
+            .await
+            .unwrap(),
+        0
+    );
+
+    let second = store
+        .apply_retention_page(
+            10,
+            100,
+            RetentionPage {
+                start_after_partition: first.next_partition.as_ref(),
+                start_after_object: first.next_object.as_deref(),
+                max_partitions: 1,
+                max_spans: 1,
+                max_objects: 1,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(second.removed_spans, 1);
+    assert_eq!(second.next_partition, None);
+    assert_eq!(
+        store
+            .list_offset(&PartitionKey::new("retention-b", 0), -2)
+            .await
+            .unwrap(),
+        1
+    );
+
+    let first_objects = store
+        .apply_retention_page(
+            110,
+            100,
+            RetentionPage {
+                start_after_partition: None,
+                start_after_object: None,
+                max_partitions: 1,
+                max_spans: 1,
+                max_objects: 1,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(first_objects.deletable_objects, ["objects/retention-a"]);
+    assert_eq!(
+        first_objects.next_object.as_deref(),
+        Some("objects/retention-a")
+    );
+
+    let second_objects = store
+        .apply_retention_page(
+            110,
+            100,
+            RetentionPage {
+                start_after_partition: first_objects.next_partition.as_ref(),
+                start_after_object: first_objects.next_object.as_deref(),
+                max_partitions: 1,
+                max_spans: 1,
+                max_objects: 1,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(second_objects.deletable_objects, ["objects/retention-b"]);
+    assert_eq!(second_objects.next_object, None);
 }
 
 fn transactional_draft(

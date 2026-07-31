@@ -1,6 +1,7 @@
 use crate::batcher::PendingObjects;
 use crate::health::Metrics;
 use chrono::Utc;
+use futures_util::StreamExt;
 use rutomq_control::MetadataStore;
 use rutomq_storage::{ObjectMetadata, ObjectStore};
 use std::collections::HashSet;
@@ -9,6 +10,7 @@ use tokio::time::{Duration, sleep};
 use tracing::{debug, warn};
 
 const MAX_INTENTS_PER_SWEEP: i64 = 1_000;
+const MAX_OBJECTS_PER_SWEEP: usize = 1_000;
 
 pub fn spawn(
     metadata: Arc<dyn MetadataStore>,
@@ -22,15 +24,16 @@ pub fn spawn(
     tokio::spawn(async move {
         let prefix = format!("data/{cluster_id}/");
         let interval = interval.max(Duration::from_millis(1));
+        let mut object_cursor = None;
         loop {
-            collect(
+            collect_page(
                 &metadata,
                 &objects,
                 &prefix,
                 &pending,
-                Utc::now().timestamp_millis(),
-                grace,
+                stale_before_ms(Utc::now().timestamp_millis(), grace),
                 &metrics,
+                &mut object_cursor,
             )
             .await;
             sleep(interval).await;
@@ -38,17 +41,15 @@ pub fn spawn(
     });
 }
 
-async fn collect(
+async fn collect_page(
     metadata: &Arc<dyn MetadataStore>,
     objects: &Arc<dyn ObjectStore>,
     prefix: &str,
     pending: &PendingObjects,
-    now_ms: i64,
-    grace: Duration,
+    stale_before_ms: i64,
     metrics: &Metrics,
+    object_cursor: &mut Option<String>,
 ) {
-    let grace_ms = i64::try_from(grace.as_millis()).unwrap_or(i64::MAX);
-    let stale_before_ms = now_ms.saturating_sub(grace_ms);
     let claimed = match metadata
         .claim_stale_objects(stale_before_ms, MAX_INTENTS_PER_SWEEP)
         .await
@@ -67,7 +68,7 @@ async fn collect(
         delete_claimed(metadata, objects, key, metrics).await;
     }
 
-    let entries = match objects.list(prefix).await {
+    let mut entries = match objects.list_stream(prefix, object_cursor.as_deref()).await {
         Ok(entries) => entries,
         Err(error) => {
             metrics.orphan_gc_errors.inc();
@@ -75,7 +76,22 @@ async fn collect(
             return;
         }
     };
-    for entry in entries {
+    let mut scanned = 0;
+    while scanned < MAX_OBJECTS_PER_SWEEP {
+        let entry = match entries.next().await {
+            Some(Ok(entry)) => entry,
+            Some(Err(error)) => {
+                metrics.orphan_gc_errors.inc();
+                debug!(%error, prefix, "orphan object listing failed");
+                return;
+            }
+            None => {
+                *object_cursor = None;
+                return;
+            }
+        };
+        *object_cursor = Some(entry.key.clone());
+        scanned += 1;
         if claimed.contains(&entry.key) || is_pending(pending, &entry.key) {
             continue;
         }
@@ -101,6 +117,33 @@ async fn collect(
             delete_untracked(objects, &entry.key, metrics).await;
         }
     }
+}
+
+fn stale_before_ms(now_ms: i64, grace: Duration) -> i64 {
+    let grace_ms = i64::try_from(grace.as_millis()).unwrap_or(i64::MAX);
+    now_ms.saturating_sub(grace_ms)
+}
+
+#[cfg(test)]
+async fn collect(
+    metadata: &Arc<dyn MetadataStore>,
+    objects: &Arc<dyn ObjectStore>,
+    prefix: &str,
+    pending: &PendingObjects,
+    now_ms: i64,
+    grace: Duration,
+    metrics: &Metrics,
+) {
+    collect_page(
+        metadata,
+        objects,
+        prefix,
+        pending,
+        stale_before_ms(now_ms, grace),
+        metrics,
+        &mut None,
+    )
+    .await;
 }
 
 fn is_pending(pending: &PendingObjects, key: &str) -> bool {
@@ -164,7 +207,9 @@ mod tests {
     use async_trait::async_trait;
     use bytes::Bytes;
     use rutomq_control::{BatchDraft, MemoryMetadataStore, MetadataStore, ObjectRef, PartitionKey};
-    use rutomq_storage::{ObjectMetadata, ObjectStore, OpenDalObjectStore, StorageError};
+    use rutomq_storage::{
+        ObjectMetadata, ObjectStore, ObjectStream, OpenDalObjectStore, StorageError,
+    };
     use std::collections::HashSet;
     use std::ops::Range;
     use std::sync::Mutex;
@@ -192,8 +237,12 @@ mod tests {
             self.inner.head(key).await
         }
 
-        async fn list(&self, prefix: &str) -> Result<Vec<ObjectMetadata>, StorageError> {
-            self.inner.list(prefix).await
+        async fn list_stream(
+            &self,
+            prefix: &str,
+            start_after: Option<&str>,
+        ) -> Result<ObjectStream, StorageError> {
+            self.inner.list_stream(prefix, start_after).await
         }
 
         async fn delete(&self, _key: &str) -> Result<(), StorageError> {
@@ -471,5 +520,51 @@ mod tests {
 
         assert!(!metadata.object_staged(key).await.unwrap());
         assert_eq!(metrics.orphan_gc_deleted.get(), 1);
+    }
+
+    #[tokio::test]
+    async fn object_discovery_is_bounded_and_resumes_from_its_cursor() {
+        let metadata: Arc<dyn MetadataStore> = Arc::new(MemoryMetadataStore::new());
+        let store = OpenDalObjectStore::memory().unwrap();
+        for index in 0..=MAX_OBJECTS_PER_SWEEP {
+            store
+                .put_immutable(
+                    &format!("data/test/{index:04}"),
+                    Bytes::from_static(b"orphan"),
+                )
+                .await
+                .unwrap();
+        }
+        let objects: Arc<dyn ObjectStore> = Arc::new(store.clone());
+        let pending = Arc::new(Mutex::new(HashSet::new()));
+        let metrics = Metrics::new().unwrap();
+        let mut cursor = None;
+        let now_ms = Utc::now().timestamp_millis().saturating_add(1_000);
+
+        collect_page(
+            &metadata,
+            &objects,
+            "data/test/",
+            &pending,
+            stale_before_ms(now_ms, Duration::ZERO),
+            &metrics,
+            &mut cursor,
+        )
+        .await;
+        assert_eq!(cursor.as_deref(), Some("data/test/0999"));
+        assert_eq!(store.list("data/test/").await.unwrap().len(), 1_001);
+
+        collect_page(
+            &metadata,
+            &objects,
+            "data/test/",
+            &pending,
+            stale_before_ms(now_ms, Duration::ZERO),
+            &metrics,
+            &mut cursor,
+        )
+        .await;
+        assert!(cursor.is_none());
+        assert_eq!(store.list("data/test/").await.unwrap().len(), 1_001);
     }
 }

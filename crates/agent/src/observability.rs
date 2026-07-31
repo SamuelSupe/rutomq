@@ -56,8 +56,9 @@ async fn collect(
     max_lag_series: usize,
     max_retention_series: usize,
 ) -> Result<()> {
-    let mut groups = metadata.list_groups().await?;
-    groups.sort_by(|left, right| left.group_id.cmp(&right.group_id));
+    let mut groups = metadata
+        .list_groups_limited(max_groups.saturating_add(1))
+        .await?;
     let groups_truncated = groups.len() > max_groups;
     groups.truncate(max_groups);
 

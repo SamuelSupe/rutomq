@@ -2,10 +2,12 @@
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use futures_util::{Stream, StreamExt, TryStreamExt, future};
 use opendal::Operator;
 use opendal::layers::RetryLayer;
 use opendal::services::{Memory, S3};
 use std::ops::Range;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use thiserror::Error;
@@ -35,12 +37,22 @@ pub struct ObjectMetadata {
     pub etag: Option<String>,
 }
 
+pub type ObjectStream =
+    Pin<Box<dyn Stream<Item = Result<ObjectMetadata, StorageError>> + Send + 'static>>;
+
 #[async_trait]
 pub trait ObjectStore: Send + Sync {
     async fn put_immutable(&self, key: &str, value: Bytes) -> Result<ObjectMetadata, StorageError>;
     async fn get_range(&self, key: &str, range: Range<u64>) -> Result<Bytes, StorageError>;
     async fn head(&self, key: &str) -> Result<ObjectMetadata, StorageError>;
-    async fn list(&self, prefix: &str) -> Result<Vec<ObjectMetadata>, StorageError>;
+    async fn list_stream(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+    ) -> Result<ObjectStream, StorageError>;
+    async fn list(&self, prefix: &str) -> Result<Vec<ObjectMetadata>, StorageError> {
+        self.list_stream(prefix, None).await?.try_collect().await
+    }
     async fn delete(&self, key: &str) -> Result<(), StorageError>;
     async fn check(&self) -> Result<(), StorageError>;
 }
@@ -48,10 +60,38 @@ pub trait ObjectStore: Send + Sync {
 #[derive(Clone)]
 pub struct OpenDalObjectStore {
     operator: Operator,
-    written: Arc<Mutex<std::collections::HashSet<String>>>,
+    in_flight: Arc<Mutex<std::collections::HashSet<String>>>,
     write_chunk_bytes: usize,
     write_concurrency: usize,
     reserve_multipart: bool,
+}
+
+struct InFlightWrite {
+    keys: Arc<Mutex<std::collections::HashSet<String>>>,
+    key: String,
+}
+
+impl InFlightWrite {
+    fn reserve(keys: Arc<Mutex<std::collections::HashSet<String>>>, key: &str) -> Option<Self> {
+        let mut in_flight = keys.lock().unwrap_or_else(|error| error.into_inner());
+        if !in_flight.insert(key.to_owned()) {
+            return None;
+        }
+        drop(in_flight);
+        Some(Self {
+            keys,
+            key: key.to_owned(),
+        })
+    }
+}
+
+impl Drop for InFlightWrite {
+    fn drop(&mut self) {
+        self.keys
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&self.key);
+    }
 }
 
 impl OpenDalObjectStore {
@@ -59,7 +99,7 @@ impl OpenDalObjectStore {
         let operator = Operator::new(Memory::default())?;
         Ok(Self {
             operator,
-            written: Arc::new(Mutex::new(Default::default())),
+            in_flight: Arc::new(Mutex::new(Default::default())),
             write_chunk_bytes: DEFAULT_WRITE_CHUNK_BYTES,
             write_concurrency: DEFAULT_WRITE_CONCURRENCY,
             reserve_multipart: false,
@@ -92,7 +132,7 @@ impl OpenDalObjectStore {
         );
         Ok(Self {
             operator,
-            written: Arc::new(Mutex::new(Default::default())),
+            in_flight: Arc::new(Mutex::new(Default::default())),
             write_chunk_bytes: config.write_chunk_bytes,
             write_concurrency: config.write_concurrency,
             reserve_multipart: true,
@@ -187,14 +227,9 @@ impl Default for S3Config {
 #[async_trait]
 impl ObjectStore for OpenDalObjectStore {
     async fn put_immutable(&self, key: &str, value: Bytes) -> Result<ObjectMetadata, StorageError> {
-        let reserved = self
-            .written
-            .lock()
-            .expect("object key lock is not poisoned")
-            .insert(key.to_owned());
-        if !reserved {
+        let Some(_in_flight) = InFlightWrite::reserve(self.in_flight.clone(), key) else {
             return Err(StorageError::AlreadyExists(key.to_owned()));
-        }
+        };
         match self.write_immutable(key, value).await {
             Ok(metadata) => Ok(ObjectMetadata {
                 key: key.to_owned(),
@@ -204,13 +239,7 @@ impl ObjectStore for OpenDalObjectStore {
                     .map(|timestamp| timestamp.into_inner().as_millisecond()),
                 etag: metadata.etag().map(ToOwned::to_owned),
             }),
-            Err(error) => {
-                self.written
-                    .lock()
-                    .expect("object key lock is not poisoned")
-                    .remove(key);
-                Err(error)
-            }
+            Err(error) => Err(error),
         }
     }
 
@@ -231,24 +260,28 @@ impl ObjectStore for OpenDalObjectStore {
         })
     }
 
-    async fn list(&self, prefix: &str) -> Result<Vec<ObjectMetadata>, StorageError> {
-        let entries = self.operator.list(prefix).await?;
-        let mut result = Vec::with_capacity(entries.len());
-        for entry in entries {
-            let key = entry.path().to_owned();
-            let size = entry.metadata().content_length();
-            let last_modified_ms = entry
-                .metadata()
-                .last_modified()
-                .map(|timestamp| timestamp.into_inner().as_millisecond());
-            result.push(ObjectMetadata {
-                key,
-                size,
-                last_modified_ms,
-                etag: entry.metadata().etag().map(ToOwned::to_owned),
-            });
+    async fn list_stream(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+    ) -> Result<ObjectStream, StorageError> {
+        let supports_start_after = self.operator.info().capability().list_with_start_after;
+        let mut listing = self.operator.lister_with(prefix);
+        if supports_start_after && let Some(cursor) = start_after {
+            listing = listing.start_after(cursor);
         }
-        Ok(result)
+        let cursor = start_after.map(ToOwned::to_owned);
+        let stream = listing.await?.filter_map(move |entry| {
+            let result = match entry {
+                Ok(entry) if cursor.as_deref().is_none_or(|cursor| entry.path() > cursor) => {
+                    Some(Ok(object_metadata(entry)))
+                }
+                Ok(_) => None,
+                Err(error) => Some(Err(StorageError::Backend(error))),
+            };
+            future::ready(result)
+        });
+        Ok(Box::pin(stream))
     }
 
     async fn delete(&self, key: &str) -> Result<(), StorageError> {
@@ -259,6 +292,18 @@ impl ObjectStore for OpenDalObjectStore {
     async fn check(&self) -> Result<(), StorageError> {
         self.operator.check().await?;
         Ok(())
+    }
+}
+
+fn object_metadata(entry: opendal::Entry) -> ObjectMetadata {
+    ObjectMetadata {
+        key: entry.path().to_owned(),
+        size: entry.metadata().content_length(),
+        last_modified_ms: entry
+            .metadata()
+            .last_modified()
+            .map(|timestamp| timestamp.into_inner().as_millisecond()),
+        etag: entry.metadata().etag().map(ToOwned::to_owned),
     }
 }
 
@@ -281,6 +326,40 @@ mod tests {
                 .await,
             Err(StorageError::AlreadyExists(_))
         ));
+        assert!(
+            store
+                .in_flight
+                .lock()
+                .expect("object key lock is not poisoned")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_listing_resumes_after_an_absent_cursor_key() {
+        let store = OpenDalObjectStore::memory().unwrap();
+        for key in ["objects/a", "objects/b", "objects/c"] {
+            store
+                .put_immutable(key, Bytes::from_static(b"value"))
+                .await
+                .unwrap();
+        }
+        store.delete("objects/a").await.unwrap();
+
+        let entries = store
+            .list_stream("objects/", Some("objects/a"))
+            .await
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.key.as_str())
+                .collect::<Vec<_>>(),
+            ["objects/b", "objects/c"]
+        );
     }
 
     #[test]

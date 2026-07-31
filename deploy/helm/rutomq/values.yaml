@@ -37,6 +37,10 @@ cluster:
 agent:
   flushIntervalMs: 250
   maxBatchBytes: 8388608
+  maxConnections: 1024
+  maxInflightRequestBytes: 268435456
+  maxInflightResponseBytes: 268435456
+  connectionIoTimeoutMs: 30000
   maxRequestPartitionSizeLimit: 2000
   fetchCacheBytes: 268435456
   observabilityIntervalMs: 15000

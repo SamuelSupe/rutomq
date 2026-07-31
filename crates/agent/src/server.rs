@@ -69,7 +69,7 @@ use kafka_protocol::messages::{
 };
 #[cfg(test)]
 use kafka_protocol::messages::{OffsetCommitResponse, OffsetFetchResponse};
-use kafka_protocol::protocol::StrBytes;
+use kafka_protocol::protocol::{Encodable, StrBytes};
 #[cfg(test)]
 use rutomq_control::PartitionKey;
 use rutomq_control::{
@@ -79,8 +79,8 @@ use rutomq_control::{
     TransactionFilter,
 };
 use rutomq_protocol::{
-    MAX_FRAME_SIZE, RequestFrame, body_version, decode_body, decode_request, encode_response,
-    supports_version,
+    MAX_FRAME_SIZE, ProtocolError, RequestFrame, body_version, decode_body, decode_request,
+    encode_response as encode_protocol_response, response_frame_size, supports_version,
 };
 use rutomq_storage::ObjectStore;
 #[cfg(test)]
@@ -91,7 +91,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::sync::watch;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 use tokio::task::JoinSet;
 use tokio::time::{Duration, Instant, timeout, timeout_at};
 use tracing::{debug, info, warn};
@@ -110,7 +110,45 @@ pub struct Broker {
     telemetry: ClientTelemetryManager,
     fetch_sessions: FetchSessionManager,
     fetch_cache: FetchCache,
+    connection_slots: Arc<Semaphore>,
+    request_bytes: Arc<Semaphore>,
+    response_bytes: Arc<Semaphore>,
     failure_injection: FailureInjection,
+}
+
+struct BudgetedResponse {
+    bytes: Bytes,
+}
+
+struct BudgetedBytes {
+    bytes: Bytes,
+    _budget: OwnedSemaphorePermit,
+}
+
+impl AsRef<[u8]> for BudgetedBytes {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+impl BudgetedResponse {
+    fn empty() -> Self {
+        Self {
+            bytes: Bytes::new(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    fn into_bytes(self) -> Bytes {
+        self.bytes
+    }
 }
 
 #[derive(Default)]
@@ -149,6 +187,9 @@ impl Broker {
             config.telemetry_max_bytes,
         );
         let fetch_cache = FetchCache::new(config.fetch_cache_bytes);
+        let connection_slots = Arc::new(Semaphore::new(config.max_connections));
+        let request_bytes = Arc::new(Semaphore::new(config.max_inflight_request_bytes));
+        let response_bytes = Arc::new(Semaphore::new(config.max_inflight_response_bytes));
         gc::spawn(
             metadata.clone(),
             objects.clone(),
@@ -217,8 +258,42 @@ impl Broker {
             telemetry,
             fetch_sessions: FetchSessionManager::default(),
             fetch_cache,
+            connection_slots,
+            request_bytes,
+            response_bytes,
             failure_injection: FailureInjection::from_env(),
         }
+    }
+
+    fn reserve_response_bytes(
+        &self,
+        size: usize,
+    ) -> std::result::Result<OwnedSemaphorePermit, ProtocolError> {
+        let size = u32::try_from(size).map_err(|_| {
+            ProtocolError::Codec(anyhow!("Kafka response is too large for the memory budget"))
+        })?;
+        self.response_bytes
+            .clone()
+            .try_acquire_many_owned(size)
+            .map_err(|_| ProtocolError::Codec(anyhow!("Kafka response memory budget exhausted")))
+    }
+
+    fn encode_response<T: Encodable>(
+        &self,
+        api_key: ApiKey,
+        version: i16,
+        correlation_id: i32,
+        response: &T,
+    ) -> std::result::Result<BudgetedResponse, ProtocolError> {
+        let frame_size = response_frame_size(api_key, version, response)?;
+        let budget = self.reserve_response_bytes(frame_size)?;
+        let bytes = encode_protocol_response(api_key, version, correlation_id, response)?;
+        Ok(BudgetedResponse {
+            bytes: Bytes::from_owner(BudgetedBytes {
+                bytes,
+                _budget: budget,
+            }),
+        })
     }
 
     pub async fn serve(self, mut shutdown: watch::Receiver<bool>) -> Result<()> {
@@ -242,11 +317,18 @@ impl Broker {
                 }
                 accepted = listener.accept() => {
                     let (stream, peer) = accepted?;
+                    let Ok(connection_slot) =
+                        self.connection_slots.clone().try_acquire_owned()
+                    else {
+                        debug!(?peer, "Kafka connection limit reached");
+                        continue;
+                    };
                     let broker = self.clone();
                     let tls_acceptor = tls_acceptor.clone();
                     let connection_shutdown = shutdown.clone();
                     broker.metrics.active_connections.inc();
                     connections.spawn(async move {
+                        let _connection_slot = connection_slot;
                         match broker
                             .quotas
                             .reserve_ip(CONNECTION_CREATION_RATE, &peer.ip().to_string(), 1.0)
@@ -332,7 +414,9 @@ impl Broker {
         let mut client_information = ClientInformation::default();
         loop {
             let frame_size = match tokio::select! {
-                result = stream.read_i32() => result,
+                result = timeout(self.config.connection_io_timeout, stream.read_i32()) => {
+                    result.map_err(|_| anyhow!("Kafka frame header read timed out"))?
+                }
                 _ = shutdown.changed() => return Ok(()),
             } {
                 Ok(size) => size,
@@ -342,10 +426,19 @@ impl Broker {
             if frame_size <= 0 || frame_size as usize > self.config.max_frame_size {
                 return Err(anyhow!("invalid Kafka frame size {frame_size}"));
             }
+            let request_bytes = self
+                .request_bytes
+                .clone()
+                .try_acquire_many_owned(frame_size as u32)
+                .map_err(|_| anyhow!("Kafka request memory budget exhausted"))?;
             let mut payload = vec![0u8; frame_size as usize];
             tokio::select! {
-                result = stream.read_exact(&mut payload) => {
-                    result?;
+                result = timeout(
+                    self.config.connection_io_timeout,
+                    stream.read_exact(&mut payload),
+                ) => {
+                    result
+                        .map_err(|_| anyhow!("Kafka frame body read timed out"))??;
                 }
                 _ = shutdown.changed() => return Ok(()),
             }
@@ -356,8 +449,18 @@ impl Broker {
                 self.handle_connection_request(payload, &mut sasl, peer, &mut client_information)
                     .await?
             };
+            drop(request_bytes);
             if !response.is_empty() {
-                stream.write_all(&response).await?;
+                tokio::select! {
+                    result = timeout(
+                        self.config.connection_io_timeout,
+                        stream.write_all(response.as_bytes()),
+                    ) => {
+                        result
+                            .map_err(|_| anyhow!("Kafka response write timed out"))??;
+                    }
+                    _ = shutdown.changed() => return Ok(()),
+                }
             }
             if sasl.is_failed() {
                 return Ok(());
@@ -372,7 +475,7 @@ impl Broker {
         &self,
         payload: Bytes,
         sasl: &mut SaslConnection,
-    ) -> Result<Bytes> {
+    ) -> Result<BudgetedResponse> {
         let result = sasl.authenticate_opaque(payload).await;
         match result.status {
             AuthenticationStatus::Complete => {
@@ -389,31 +492,45 @@ impl Broker {
             AuthenticationStatus::Continue => {}
         }
         let auth_bytes = result.response.auth_bytes;
+        if auth_bytes.len() > MAX_FRAME_SIZE {
+            return Err(anyhow!("legacy SASL response is too large"));
+        }
         let size = i32::try_from(auth_bytes.len())
             .map_err(|_| anyhow!("legacy SASL response is too large"))?;
-        let mut response = Vec::with_capacity(4 + auth_bytes.len());
+        let frame_size = auth_bytes
+            .len()
+            .checked_add(4)
+            .ok_or_else(|| anyhow!("legacy SASL response is too large"))?;
+        let budget = self.reserve_response_bytes(frame_size)?;
+        let mut response = Vec::with_capacity(frame_size);
         response.extend_from_slice(&size.to_be_bytes());
         response.extend_from_slice(&auth_bytes);
-        Ok(Bytes::from(response))
+        Ok(BudgetedResponse {
+            bytes: Bytes::from_owner(BudgetedBytes {
+                bytes: Bytes::from(response),
+                _budget: budget,
+            }),
+        })
     }
 
     pub async fn handle_request(&self, payload: Bytes) -> Result<Bytes> {
-        let request = match connection_request(payload)? {
-            ConnectionRequest::Supported(request) => request,
+        let response = match connection_request(payload)? {
+            ConnectionRequest::Supported(request) => {
+                self.dispatch_request(
+                    request,
+                    &AuthorizationContext::anonymous(std::net::Ipv4Addr::LOCALHOST.into()),
+                )
+                .await?
+            }
             ConnectionRequest::UnsupportedApiVersions {
                 correlation_id,
                 requested_version,
             } => {
-                return self
-                    .unsupported_api_versions_response(correlation_id, requested_version)
-                    .await;
+                self.unsupported_api_versions_response(correlation_id, requested_version)
+                    .await?
             }
         };
-        self.dispatch_request(
-            request,
-            &AuthorizationContext::anonymous(std::net::Ipv4Addr::LOCALHOST.into()),
-        )
-        .await
+        Ok(response.into_bytes())
     }
 
     async fn handle_connection_request(
@@ -422,7 +539,7 @@ impl Broker {
         sasl: &mut SaslConnection,
         peer: SocketAddr,
         client_information: &mut ClientInformation,
-    ) -> Result<Bytes> {
+    ) -> Result<BudgetedResponse> {
         let request = match connection_request(payload)? {
             ConnectionRequest::Supported(request) => request,
             ConnectionRequest::UnsupportedApiVersions {
@@ -444,7 +561,7 @@ impl Broker {
                 if reauthenticating && sasl.is_failed() {
                     self.metrics.sasl_reauthentication_failures.inc();
                 }
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::SaslHandshake,
                     version,
                     correlation_id,
@@ -479,7 +596,7 @@ impl Broker {
                     }
                     AuthenticationStatus::Continue => {}
                 }
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::SaslAuthenticate,
                     version,
                     correlation_id,
@@ -513,26 +630,21 @@ impl Broker {
         &self,
         correlation_id: i32,
         requested_version: i16,
-    ) -> Result<Bytes> {
+    ) -> Result<BudgetedResponse> {
         self.metrics
             .record_kafka_request(ApiKey::ApiVersions, requested_version);
         let response = self
             .handle_api_versions(0)
             .await
             .with_error_code(UNSUPPORTED_VERSION);
-        Ok(encode_response(
-            ApiKey::ApiVersions,
-            0,
-            correlation_id,
-            &response,
-        )?)
+        Ok(self.encode_response(ApiKey::ApiVersions, 0, correlation_id, &response)?)
     }
 
     async fn dispatch_request(
         &self,
         request: RequestFrame,
         context: &AuthorizationContext,
-    ) -> Result<Bytes> {
+    ) -> Result<BudgetedResponse> {
         let api_key = request.api_key;
         self.metrics.record_kafka_request(api_key, request.version);
         let client_id = request
@@ -588,7 +700,7 @@ impl Broker {
         request: RequestFrame,
         context: &AuthorizationContext,
         client_id: String,
-    ) -> Result<Bytes> {
+    ) -> Result<BudgetedResponse> {
         let correlation_id = request.header.correlation_id;
         match request.api_key {
             ApiKey::SaslHandshake | ApiKey::SaslAuthenticate => {
@@ -597,7 +709,7 @@ impl Broker {
             ApiKey::ApiVersions => {
                 let _: ApiVersionsRequest = decode_body(request.body, request.version)?;
                 let response = self.handle_api_versions(request.version).await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     request.api_key,
                     request.version,
                     correlation_id,
@@ -609,7 +721,7 @@ impl Broker {
                 let typed_request: GetTelemetrySubscriptionsRequest =
                     decode_body(request.body, version)?;
                 let response = self.telemetry.get(typed_request, &client_id, context).await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::GetTelemetrySubscriptions,
                     version,
                     correlation_id,
@@ -623,7 +735,7 @@ impl Broker {
                     .telemetry
                     .push(typed_request, &client_id, context)
                     .await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::PushTelemetry,
                     version,
                     correlation_id,
@@ -636,7 +748,7 @@ impl Broker {
                 let response = self
                     .handle_update_features(typed_request, version, context)
                     .await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::UpdateFeatures,
                     version,
                     correlation_id,
@@ -647,7 +759,7 @@ impl Broker {
                 let version = request.version;
                 let typed_request: DescribeAclsRequest = decode_body(request.body, version)?;
                 let response = self.handle_describe_acls(typed_request, context).await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::DescribeAcls,
                     version,
                     correlation_id,
@@ -658,23 +770,13 @@ impl Broker {
                 let version = request.version;
                 let typed_request: CreateAclsRequest = decode_body(request.body, version)?;
                 let response = self.handle_create_acls(typed_request, context).await;
-                Ok(encode_response(
-                    ApiKey::CreateAcls,
-                    version,
-                    correlation_id,
-                    &response,
-                )?)
+                Ok(self.encode_response(ApiKey::CreateAcls, version, correlation_id, &response)?)
             }
             ApiKey::DeleteAcls => {
                 let version = request.version;
                 let typed_request: DeleteAclsRequest = decode_body(request.body, version)?;
                 let response = self.handle_delete_acls(typed_request, context).await;
-                Ok(encode_response(
-                    ApiKey::DeleteAcls,
-                    version,
-                    correlation_id,
-                    &response,
-                )?)
+                Ok(self.encode_response(ApiKey::DeleteAcls, version, correlation_id, &response)?)
             }
             ApiKey::DescribeUserScramCredentials => {
                 let version = request.version;
@@ -683,7 +785,7 @@ impl Broker {
                 let response = self
                     .handle_describe_user_scram_credentials(typed_request, context)
                     .await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::DescribeUserScramCredentials,
                     version,
                     correlation_id,
@@ -697,7 +799,7 @@ impl Broker {
                 let response = self
                     .handle_alter_user_scram_credentials(typed_request, context)
                     .await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::AlterUserScramCredentials,
                     version,
                     correlation_id,
@@ -711,7 +813,7 @@ impl Broker {
                 let response = self
                     .handle_create_delegation_token(typed_request, version, context)
                     .await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::CreateDelegationToken,
                     version,
                     correlation_id,
@@ -725,7 +827,7 @@ impl Broker {
                 let response = self
                     .handle_renew_delegation_token(typed_request, context)
                     .await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::RenewDelegationToken,
                     version,
                     correlation_id,
@@ -739,7 +841,7 @@ impl Broker {
                 let response = self
                     .handle_expire_delegation_token(typed_request, context)
                     .await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::ExpireDelegationToken,
                     version,
                     correlation_id,
@@ -753,7 +855,7 @@ impl Broker {
                 let response = self
                     .handle_describe_delegation_token(typed_request, version, context)
                     .await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::DescribeDelegationToken,
                     version,
                     correlation_id,
@@ -767,7 +869,7 @@ impl Broker {
                 let response = self
                     .handle_describe_client_quotas(typed_request, context)
                     .await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::DescribeClientQuotas,
                     version,
                     correlation_id,
@@ -780,7 +882,7 @@ impl Broker {
                 let response = self
                     .handle_alter_client_quotas(typed_request, context)
                     .await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::AlterClientQuotas,
                     version,
                     correlation_id,
@@ -793,12 +895,7 @@ impl Broker {
                 let response = self
                     .handle_metadata(typed_request, version, context)
                     .await?;
-                Ok(encode_response(
-                    ApiKey::Metadata,
-                    version,
-                    correlation_id,
-                    &response,
-                )?)
+                Ok(self.encode_response(ApiKey::Metadata, version, correlation_id, &response)?)
             }
             ApiKey::DescribeCluster => {
                 let version = request.version;
@@ -806,7 +903,7 @@ impl Broker {
                 let response = self
                     .handle_describe_cluster(typed_request, version, context)
                     .await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::DescribeCluster,
                     version,
                     correlation_id,
@@ -819,7 +916,7 @@ impl Broker {
                 let response = self
                     .handle_describe_quorum(typed_request, version, context)
                     .await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::DescribeQuorum,
                     version,
                     correlation_id,
@@ -830,7 +927,7 @@ impl Broker {
                 let version = request.version;
                 let typed_request: ElectLeadersRequest = decode_body(request.body, version)?;
                 let response = self.handle_elect_leaders(typed_request, context).await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::ElectLeaders,
                     version,
                     correlation_id,
@@ -844,7 +941,7 @@ impl Broker {
                 let response = self
                     .handle_alter_partition_reassignments(typed_request, context)
                     .await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::AlterPartitionReassignments,
                     version,
                     correlation_id,
@@ -858,7 +955,7 @@ impl Broker {
                 let response = self
                     .handle_list_partition_reassignments(typed_request, context)
                     .await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::ListPartitionReassignments,
                     version,
                     correlation_id,
@@ -871,7 +968,7 @@ impl Broker {
                 let response = self
                     .handle_create_topics(typed_request, version, context)
                     .await?;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::CreateTopics,
                     version,
                     correlation_id,
@@ -884,7 +981,7 @@ impl Broker {
                 let response = self
                     .handle_delete_topics(typed_request, version, context)
                     .await?;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::DeleteTopics,
                     version,
                     correlation_id,
@@ -895,7 +992,7 @@ impl Broker {
                 let version = request.version;
                 let typed_request: DeleteRecordsRequest = decode_body(request.body, version)?;
                 let response = self.handle_delete_records(typed_request, context).await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::DeleteRecords,
                     version,
                     correlation_id,
@@ -906,7 +1003,7 @@ impl Broker {
                 let version = request.version;
                 let typed_request: CreatePartitionsRequest = decode_body(request.body, version)?;
                 let response = self.handle_create_partitions(typed_request, context).await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::CreatePartitions,
                     version,
                     correlation_id,
@@ -920,7 +1017,7 @@ impl Broker {
                 let response = self
                     .handle_describe_topic_partitions(typed_request, context)
                     .await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::DescribeTopicPartitions,
                     version,
                     correlation_id,
@@ -933,7 +1030,7 @@ impl Broker {
                 let response = self
                     .handle_describe_configs(typed_request, version, context)
                     .await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::DescribeConfigs,
                     version,
                     correlation_id,
@@ -946,7 +1043,7 @@ impl Broker {
                 let response = self
                     .handle_list_config_resources(typed_request, version, context)
                     .await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::ListConfigResources,
                     version,
                     correlation_id,
@@ -957,7 +1054,7 @@ impl Broker {
                 let version = request.version;
                 let typed_request: AlterConfigsRequest = decode_body(request.body, version)?;
                 let response = self.handle_alter_configs(typed_request, context).await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::AlterConfigs,
                     version,
                     correlation_id,
@@ -971,7 +1068,7 @@ impl Broker {
                 let response = self
                     .handle_incremental_alter_configs(typed_request, context)
                     .await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::IncrementalAlterConfigs,
                     version,
                     correlation_id,
@@ -984,7 +1081,7 @@ impl Broker {
                 let response = self
                     .handle_alter_replica_log_dirs(typed_request, context)
                     .await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::AlterReplicaLogDirs,
                     version,
                     correlation_id,
@@ -995,7 +1092,7 @@ impl Broker {
                 let version = request.version;
                 let typed_request: DescribeLogDirsRequest = decode_body(request.body, version)?;
                 let response = self.handle_describe_log_dirs(typed_request, context).await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::DescribeLogDirs,
                     version,
                     correlation_id,
@@ -1066,14 +1163,9 @@ impl Broker {
                     }) {
                         return Err(anyhow!("acks=0 Produce failed"));
                     }
-                    return Ok(Bytes::new());
+                    return Ok(BudgetedResponse::empty());
                 }
-                Ok(encode_response(
-                    ApiKey::Produce,
-                    version,
-                    correlation_id,
-                    &response,
-                )?)
+                Ok(self.encode_response(ApiKey::Produce, version, correlation_id, &response)?)
             }
             ApiKey::InitProducerId => {
                 let version = request.version;
@@ -1081,7 +1173,7 @@ impl Broker {
                 let response = self
                     .handle_init_producer_id(typed_request, version, context)
                     .await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::InitProducerId,
                     version,
                     correlation_id,
@@ -1095,7 +1187,7 @@ impl Broker {
                 let response = self
                     .handle_offset_for_leader_epoch(typed_request, context)
                     .await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::OffsetForLeaderEpoch,
                     version,
                     correlation_id,
@@ -1108,7 +1200,7 @@ impl Broker {
                 let response = self
                     .handle_add_partitions_to_txn(typed_request, version, context)
                     .await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::AddPartitionsToTxn,
                     version,
                     correlation_id,
@@ -1121,7 +1213,7 @@ impl Broker {
                 let response = self
                     .handle_add_offsets_to_txn(typed_request, version, context)
                     .await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::AddOffsetsToTxn,
                     version,
                     correlation_id,
@@ -1134,7 +1226,7 @@ impl Broker {
                 let response = self
                     .handle_txn_offset_commit(typed_request, version, context)
                     .await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::TxnOffsetCommit,
                     version,
                     correlation_id,
@@ -1145,18 +1237,13 @@ impl Broker {
                 let version = request.version;
                 let typed_request: EndTxnRequest = decode_body(request.body, version)?;
                 let response = self.handle_end_txn(typed_request, version, context).await;
-                Ok(encode_response(
-                    ApiKey::EndTxn,
-                    version,
-                    correlation_id,
-                    &response,
-                )?)
+                Ok(self.encode_response(ApiKey::EndTxn, version, correlation_id, &response)?)
             }
             ApiKey::WriteTxnMarkers => {
                 let version = request.version;
                 let typed_request: WriteTxnMarkersRequest = decode_body(request.body, version)?;
                 let response = self.handle_write_txn_markers(typed_request, context).await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::WriteTxnMarkers,
                     version,
                     correlation_id,
@@ -1170,7 +1257,7 @@ impl Broker {
                 let response = self
                     .handle_describe_transactions(typed_request, context)
                     .await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::DescribeTransactions,
                     version,
                     correlation_id,
@@ -1181,7 +1268,7 @@ impl Broker {
                 let version = request.version;
                 let typed_request: ListTransactionsRequest = decode_body(request.body, version)?;
                 let response = self.handle_list_transactions(typed_request, context).await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::ListTransactions,
                     version,
                     correlation_id,
@@ -1192,7 +1279,7 @@ impl Broker {
                 let version = request.version;
                 let typed_request: DescribeProducersRequest = decode_body(request.body, version)?;
                 let response = self.handle_describe_producers(typed_request, context).await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::DescribeProducers,
                     version,
                     correlation_id,
@@ -1238,7 +1325,7 @@ impl Broker {
                     self.fetch_sessions
                         .commit_response(fetched.session, &fetched.response);
                 }
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::Fetch,
                     version,
                     correlation_id,
@@ -1252,12 +1339,7 @@ impl Broker {
                 let response = self
                     .handle_list_offsets(typed_request, version, context)
                     .await;
-                Ok(encode_response(
-                    ApiKey::ListOffsets,
-                    version,
-                    correlation_id,
-                    &response,
-                )?)
+                Ok(self.encode_response(ApiKey::ListOffsets, version, correlation_id, &response)?)
             }
             ApiKey::FindCoordinator => {
                 let version = request.version;
@@ -1265,7 +1347,7 @@ impl Broker {
                 let response = self
                     .handle_find_coordinator(typed_request, version, context)
                     .await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::FindCoordinator,
                     version,
                     correlation_id,
@@ -1278,7 +1360,7 @@ impl Broker {
                 let response = self
                     .handle_offset_commit(typed_request, version, context)
                     .await?;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::OffsetCommit,
                     version,
                     correlation_id,
@@ -1291,18 +1373,13 @@ impl Broker {
                 let response = self
                     .handle_offset_fetch(typed_request, version, context)
                     .await?;
-                Ok(encode_response(
-                    ApiKey::OffsetFetch,
-                    version,
-                    correlation_id,
-                    &response,
-                )?)
+                Ok(self.encode_response(ApiKey::OffsetFetch, version, correlation_id, &response)?)
             }
             ApiKey::OffsetDelete => {
                 let version = request.version;
                 let typed_request: OffsetDeleteRequest = decode_body(request.body, version)?;
                 let response = self.handle_offset_delete(typed_request, context).await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::OffsetDelete,
                     version,
                     correlation_id,
@@ -1315,34 +1392,19 @@ impl Broker {
                 let response = self
                     .handle_join_group(typed_request, version, context, &client_id)
                     .await;
-                Ok(encode_response(
-                    ApiKey::JoinGroup,
-                    version,
-                    correlation_id,
-                    &response,
-                )?)
+                Ok(self.encode_response(ApiKey::JoinGroup, version, correlation_id, &response)?)
             }
             ApiKey::SyncGroup => {
                 let version = request.version;
                 let typed_request: SyncGroupRequest = decode_body(request.body, version)?;
                 let response = self.handle_sync_group(typed_request, context).await;
-                Ok(encode_response(
-                    ApiKey::SyncGroup,
-                    version,
-                    correlation_id,
-                    &response,
-                )?)
+                Ok(self.encode_response(ApiKey::SyncGroup, version, correlation_id, &response)?)
             }
             ApiKey::Heartbeat => {
                 let version = request.version;
                 let typed_request: HeartbeatRequest = decode_body(request.body, version)?;
                 let response = self.handle_heartbeat(typed_request, context).await;
-                Ok(encode_response(
-                    ApiKey::Heartbeat,
-                    version,
-                    correlation_id,
-                    &response,
-                )?)
+                Ok(self.encode_response(ApiKey::Heartbeat, version, correlation_id, &response)?)
             }
             ApiKey::LeaveGroup => {
                 let version = request.version;
@@ -1350,12 +1412,7 @@ impl Broker {
                 let response = self
                     .handle_leave_group(typed_request, version, context)
                     .await;
-                Ok(encode_response(
-                    ApiKey::LeaveGroup,
-                    version,
-                    correlation_id,
-                    &response,
-                )?)
+                Ok(self.encode_response(ApiKey::LeaveGroup, version, correlation_id, &response)?)
             }
             ApiKey::ListGroups => {
                 let version = request.version;
@@ -1363,12 +1420,7 @@ impl Broker {
                 let response = self
                     .handle_list_groups(typed_request, version, context)
                     .await;
-                Ok(encode_response(
-                    ApiKey::ListGroups,
-                    version,
-                    correlation_id,
-                    &response,
-                )?)
+                Ok(self.encode_response(ApiKey::ListGroups, version, correlation_id, &response)?)
             }
             ApiKey::DescribeGroups => {
                 let version = request.version;
@@ -1376,7 +1428,7 @@ impl Broker {
                 let response = self
                     .handle_describe_groups(typed_request, version, context)
                     .await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::DescribeGroups,
                     version,
                     correlation_id,
@@ -1387,7 +1439,7 @@ impl Broker {
                 let version = request.version;
                 let typed_request: DeleteGroupsRequest = decode_body(request.body, version)?;
                 let response = self.handle_delete_groups(typed_request, context).await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::DeleteGroups,
                     version,
                     correlation_id,
@@ -1401,7 +1453,7 @@ impl Broker {
                 let response = self
                     .handle_consumer_group_heartbeat(typed_request, context, client_id)
                     .await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::ConsumerGroupHeartbeat,
                     version,
                     correlation_id,
@@ -1415,7 +1467,7 @@ impl Broker {
                 let response = self
                     .handle_consumer_group_describe(typed_request, version, context)
                     .await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::ConsumerGroupDescribe,
                     version,
                     correlation_id,
@@ -1429,7 +1481,7 @@ impl Broker {
                 let response = self
                     .handle_streams_group_heartbeat(typed_request, context, client_id)
                     .await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::StreamsGroupHeartbeat,
                     version,
                     correlation_id,
@@ -1443,7 +1495,7 @@ impl Broker {
                 let response = self
                     .handle_streams_group_describe(typed_request, context)
                     .await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::StreamsGroupDescribe,
                     version,
                     correlation_id,
@@ -1457,7 +1509,7 @@ impl Broker {
                 let response = self
                     .handle_describe_share_group_offsets(typed_request, context)
                     .await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::DescribeShareGroupOffsets,
                     version,
                     correlation_id,
@@ -1471,7 +1523,7 @@ impl Broker {
                 let response = self
                     .handle_alter_share_group_offsets(typed_request, context)
                     .await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::AlterShareGroupOffsets,
                     version,
                     correlation_id,
@@ -1485,7 +1537,7 @@ impl Broker {
                 let response = self
                     .handle_delete_share_group_offsets(typed_request, context)
                     .await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::DeleteShareGroupOffsets,
                     version,
                     correlation_id,
@@ -1498,7 +1550,7 @@ impl Broker {
                 let response = self
                     .handle_share_group_heartbeat(typed_request, context, client_id)
                     .await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::ShareGroupHeartbeat,
                     version,
                     correlation_id,
@@ -1511,7 +1563,7 @@ impl Broker {
                 let response = self
                     .handle_share_group_describe(typed_request, context)
                     .await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::ShareGroupDescribe,
                     version,
                     correlation_id,
@@ -1524,12 +1576,7 @@ impl Broker {
                 let response = self
                     .handle_share_fetch(typed_request, version, context)
                     .await?;
-                Ok(encode_response(
-                    ApiKey::ShareFetch,
-                    version,
-                    correlation_id,
-                    &response,
-                )?)
+                Ok(self.encode_response(ApiKey::ShareFetch, version, correlation_id, &response)?)
             }
             ApiKey::ShareAcknowledge => {
                 let version = request.version;
@@ -1537,7 +1584,7 @@ impl Broker {
                 let response = self
                     .handle_share_acknowledge(typed_request, version, context)
                     .await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::ShareAcknowledge,
                     version,
                     correlation_id,
@@ -1551,7 +1598,7 @@ impl Broker {
                 let response = self
                     .handle_initialize_share_group_state(typed_request, context)
                     .await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::InitializeShareGroupState,
                     version,
                     correlation_id,
@@ -1564,7 +1611,7 @@ impl Broker {
                 let response = self
                     .handle_read_share_group_state(typed_request, context)
                     .await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::ReadShareGroupState,
                     version,
                     correlation_id,
@@ -1578,7 +1625,7 @@ impl Broker {
                 let response = self
                     .handle_write_share_group_state(typed_request, context)
                     .await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::WriteShareGroupState,
                     version,
                     correlation_id,
@@ -1592,7 +1639,7 @@ impl Broker {
                 let response = self
                     .handle_delete_share_group_state(typed_request, context)
                     .await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::DeleteShareGroupState,
                     version,
                     correlation_id,
@@ -1606,7 +1653,7 @@ impl Broker {
                 let response = self
                     .handle_read_share_group_state_summary(typed_request, context)
                     .await;
-                Ok(encode_response(
+                Ok(self.encode_response(
                     ApiKey::ReadShareGroupStateSummary,
                     version,
                     correlation_id,
@@ -2149,7 +2196,9 @@ pub async fn serve_admin(
     let listener = TcpListener::bind(config.admin_addr)
         .await
         .with_context(|| format!("bind admin listener {}", config.admin_addr))?;
-    metrics.serve(listener, shutdown).await
+    metrics
+        .serve(listener, config.connection_io_timeout, shutdown)
+        .await
 }
 
 fn topic_name(value: &str) -> kafka_protocol::messages::TopicName {

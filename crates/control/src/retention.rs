@@ -1,4 +1,4 @@
-use crate::ControlError;
+use crate::{ControlError, PartitionKey};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -226,4 +226,15 @@ mod tests {
 pub struct RetentionResult {
     pub removed_spans: u64,
     pub deletable_objects: Vec<String>,
+    pub next_partition: Option<PartitionKey>,
+    pub next_object: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RetentionPage<'a> {
+    pub start_after_partition: Option<&'a PartitionKey>,
+    pub start_after_object: Option<&'a str>,
+    pub max_partitions: usize,
+    pub max_spans: usize,
+    pub max_objects: usize,
 }

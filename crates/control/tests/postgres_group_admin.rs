@@ -71,6 +71,9 @@ async fn postgres_group_admin_persists_describes_and_deletes_groups() {
         .unwrap();
     assert_eq!(summary.state, "Stable");
     assert_eq!(summary.group_type, "Classic");
+    let limited = reconnected.list_groups_limited(1).await.unwrap();
+    assert_eq!(limited.len(), 1);
+    assert!(reconnected.list_groups_limited(0).await.unwrap().is_empty());
     let description = reconnected
         .describe_classic_groups(std::slice::from_ref(&classic_group))
         .await

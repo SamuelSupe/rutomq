@@ -11,18 +11,25 @@ pub(crate) async fn partition_retention_sizes(
         return Ok(Vec::new());
     }
     let rows = sqlx::query(
-        "SELECT t.name AS topic_name, p.partition_index,
+        "WITH selected AS (
+             SELECT t.name AS topic_name, p.topic_id, p.partition_index,
+                    c.retention_bytes
+             FROM topics t
+             JOIN partitions p ON p.topic_id = t.id
+             JOIN topic_configs c ON c.topic_id = t.id
+             ORDER BY t.name, p.partition_index
+             LIMIT $1
+         )
+         SELECT selected.topic_name, selected.partition_index,
                 COALESCE(SUM(s.byte_end - s.byte_start), 0)::BIGINT AS size_bytes,
-                c.retention_bytes
-         FROM topics t
-         JOIN partitions p ON p.topic_id = t.id
-         JOIN topic_configs c ON c.topic_id = t.id
+                selected.retention_bytes
+         FROM selected
          LEFT JOIN object_spans s
-           ON s.topic_id = p.topic_id
-          AND s.partition_index = p.partition_index
-         GROUP BY t.name, p.partition_index, c.retention_bytes
-         ORDER BY t.name, p.partition_index
-         LIMIT $1",
+           ON s.topic_id = selected.topic_id
+          AND s.partition_index = selected.partition_index
+         GROUP BY selected.topic_name, selected.partition_index,
+                  selected.retention_bytes
+         ORDER BY selected.topic_name, selected.partition_index",
     )
     .bind(i64::try_from(limit).unwrap_or(i64::MAX))
     .fetch_all(pool)

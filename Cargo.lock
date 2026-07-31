@@ -2428,7 +2428,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "rutomq"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -2442,7 +2442,7 @@ dependencies = [
 
 [[package]]
 name = "rutomq-agent"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2477,7 +2477,7 @@ dependencies = [
 
 [[package]]
 name = "rutomq-control"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2493,7 +2493,7 @@ dependencies = [
 
 [[package]]
 name = "rutomq-protocol"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2503,11 +2503,12 @@ dependencies = [
 
 [[package]]
 name = "rutomq-storage"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
  "bytes",
+ "futures-util",
  "opendal",
  "serde",
  "serde_json",

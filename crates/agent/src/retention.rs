@@ -1,10 +1,14 @@
 use crate::health::Metrics;
 use chrono::Utc;
-use rutomq_control::MetadataStore;
+use rutomq_control::{MetadataStore, PartitionKey, RetentionPage};
 use rutomq_storage::ObjectStore;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::warn;
+
+const MAX_PARTITIONS_PER_SWEEP: usize = 64;
+const MAX_SPANS_PER_SWEEP: usize = 1_000;
+const MAX_OBJECTS_PER_SWEEP: usize = 1_000;
 
 pub fn spawn(
     metadata: Arc<dyn MetadataStore>,
@@ -19,27 +23,43 @@ pub fn spawn(
         } else {
             interval
         };
+        let mut partition_cursor = None;
+        let mut object_cursor = None;
         loop {
             tokio::time::sleep(interval).await;
-            sweep(
+            sweep_page(
                 &metadata,
                 &objects,
                 object_delete_grace.as_millis() as i64,
                 &metrics,
+                &mut partition_cursor,
+                &mut object_cursor,
             )
             .await;
         }
     });
 }
 
-async fn sweep(
+async fn sweep_page(
     metadata: &Arc<dyn MetadataStore>,
     objects: &Arc<dyn ObjectStore>,
     object_delete_grace_ms: i64,
     metrics: &Metrics,
+    partition_cursor: &mut Option<PartitionKey>,
+    object_cursor: &mut Option<String>,
 ) {
     let result = match metadata
-        .apply_retention(Utc::now().timestamp_millis(), object_delete_grace_ms)
+        .apply_retention_page(
+            Utc::now().timestamp_millis(),
+            object_delete_grace_ms,
+            RetentionPage {
+                start_after_partition: partition_cursor.as_ref(),
+                start_after_object: object_cursor.as_deref(),
+                max_partitions: MAX_PARTITIONS_PER_SWEEP,
+                max_spans: MAX_SPANS_PER_SWEEP,
+                max_objects: MAX_OBJECTS_PER_SWEEP,
+            },
+        )
         .await
     {
         Ok(result) => result,
@@ -49,6 +69,8 @@ async fn sweep(
             return;
         }
     };
+    *partition_cursor = result.next_partition.clone();
+    *object_cursor = result.next_object.clone();
     metrics.retention_removed_spans.inc_by(result.removed_spans);
     for object_key in result.deletable_objects {
         match objects.delete(&object_key).await {
@@ -74,8 +96,25 @@ mod tests {
     use async_trait::async_trait;
     use bytes::Bytes;
     use rutomq_control::{BatchDraft, MemoryMetadataStore, ObjectRef, PartitionKey, TopicConfig};
-    use rutomq_storage::{ObjectMetadata, OpenDalObjectStore, StorageError};
+    use rutomq_storage::{ObjectMetadata, ObjectStream, OpenDalObjectStore, StorageError};
     use std::ops::Range;
+
+    async fn sweep(
+        metadata: &Arc<dyn MetadataStore>,
+        objects: &Arc<dyn ObjectStore>,
+        object_delete_grace_ms: i64,
+        metrics: &Metrics,
+    ) {
+        sweep_page(
+            metadata,
+            objects,
+            object_delete_grace_ms,
+            metrics,
+            &mut None,
+            &mut None,
+        )
+        .await;
+    }
 
     #[derive(Clone)]
     struct DeleteFailingStore {
@@ -100,8 +139,12 @@ mod tests {
             self.inner.head(key).await
         }
 
-        async fn list(&self, prefix: &str) -> Result<Vec<ObjectMetadata>, StorageError> {
-            self.inner.list(prefix).await
+        async fn list_stream(
+            &self,
+            prefix: &str,
+            start_after: Option<&str>,
+        ) -> Result<ObjectStream, StorageError> {
+            self.inner.list_stream(prefix, start_after).await
         }
 
         async fn delete(&self, _key: &str) -> Result<(), StorageError> {

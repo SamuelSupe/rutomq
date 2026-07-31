@@ -1,4 +1,4 @@
-use crate::{ControlError, RetentionResult, TopicConfig};
+use crate::{ControlError, PartitionKey, RetentionPage, RetentionResult, TopicConfig};
 use chrono::{DateTime, Duration, Utc};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
@@ -104,17 +104,21 @@ pub async fn set_topic_config(
     Ok(())
 }
 
-pub async fn apply(
+pub async fn apply_page(
     pool: &PgPool,
     now_ms: i64,
     object_delete_grace_ms: i64,
+    page: RetentionPage<'_>,
 ) -> Result<RetentionResult, ControlError> {
     let now = DateTime::<Utc>::from_timestamp_millis(now_ms).ok_or_else(|| {
         ControlError::InvalidRequest(format!("invalid retention timestamp {now_ms}"))
     })?;
+    let partition_limit = page.max_partitions.max(1).min(i64::MAX as usize);
+    let span_limit = page.max_spans.max(1).min(i64::MAX as usize);
+    let object_limit = page.max_objects.max(1).min(i64::MAX as usize);
     let mut transaction = pool.begin().await?;
-    let partitions = sqlx::query(
-        "SELECT p.topic_id, p.partition_index,
+    let mut partitions = sqlx::query(
+        "SELECT p.topic_id, t.name AS topic_name, p.partition_index,
                 c.retention_ms, c.retention_bytes, c.cleanup_policy,
                 c.file_delete_delay_ms, c.flush_messages, c.flush_ms,
                 c.delete_retention_ms,
@@ -128,37 +132,73 @@ pub async fn apply(
          FROM partitions p
          JOIN topics t ON t.id = p.topic_id
          JOIN topic_configs c ON c.topic_id = p.topic_id
+         WHERE ($1::TEXT IS NULL OR (t.name, p.partition_index) > ($1, $2))
          ORDER BY t.name, p.partition_index
+         LIMIT $3
          FOR UPDATE OF p",
     )
+    .bind(
+        page.start_after_partition
+            .map(|cursor| cursor.topic.as_str()),
+    )
+    .bind(
+        page.start_after_partition
+            .map_or(-1, |cursor| cursor.partition),
+    )
+    .bind(i64::try_from(partition_limit.saturating_add(1)).unwrap_or(i64::MAX))
     .fetch_all(&mut *transaction)
     .await?;
+    let has_more_partitions = partitions.len() > partition_limit;
+    partitions.truncate(partition_limit);
+    let selected_partition_count = partitions.len();
     let mut removed_spans = 0u64;
+    let mut processed_partitions = Vec::new();
     for partition in partitions {
+        if removed_spans >= span_limit as u64 {
+            break;
+        }
+        let partition_key = PartitionKey::new(
+            partition.get::<String, _>("topic_name"),
+            partition.get("partition_index"),
+        );
+        processed_partitions.push(partition_key);
         let config = config_from_row(&partition);
         if !config.deletes_records() {
             continue;
         }
         let topic_id: Uuid = partition.get("topic_id");
         let partition_index: i32 = partition.get("partition_index");
+        let remaining_spans =
+            span_limit.saturating_sub(usize::try_from(removed_spans).unwrap_or(usize::MAX));
+        let mut retained_bytes = if config.retention_bytes >= 0 {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT LEAST(
+                     COALESCE(SUM((byte_end - byte_start)::NUMERIC), 0),
+                     9223372036854775807
+                 )::BIGINT
+                 FROM object_spans
+                 WHERE topic_id = $1 AND partition_index = $2",
+            )
+            .bind(topic_id)
+            .bind(partition_index)
+            .fetch_one(&mut *transaction)
+            .await?
+        } else {
+            0
+        };
         let spans = sqlx::query(
             "SELECT id, object_key, byte_start, byte_end, timestamp_ms, txn_state
              FROM object_spans
              WHERE topic_id = $1 AND partition_index = $2
              ORDER BY base_offset
+             LIMIT $3
              FOR UPDATE",
         )
         .bind(topic_id)
         .bind(partition_index)
+        .bind(i64::try_from(remaining_spans).unwrap_or(i64::MAX))
         .fetch_all(&mut *transaction)
         .await?;
-        let mut retained_bytes = spans
-            .iter()
-            .map(|span| {
-                span.get::<i64, _>("byte_end")
-                    .saturating_sub(span.get::<i64, _>("byte_start"))
-            })
-            .sum::<i64>();
         let mut delete_ids = Vec::new();
         let mut object_keys = Vec::new();
         for span in spans {
@@ -221,46 +261,71 @@ pub async fn apply(
     }
 
     sqlx::query(
-        "UPDATE objects o
+        "WITH candidates AS (
+             SELECT o.object_key
+             FROM objects o
+             WHERE o.committed = TRUE
+               AND o.unreferenced_at IS NULL
+               AND NOT EXISTS (
+                   SELECT 1 FROM object_spans s
+                   WHERE s.object_key = o.object_key
+               )
+             ORDER BY o.object_key
+             LIMIT $2
+         )
+         UPDATE objects o
          SET unreferenced_at = COALESCE(o.unreferenced_at, $1),
              delete_after = COALESCE(o.delete_after, $1)
-         WHERE o.committed = TRUE
-           AND o.unreferenced_at IS NULL
-           AND NOT EXISTS (
-               SELECT 1 FROM object_spans s
-               WHERE s.object_key = o.object_key
-           )",
+         FROM candidates
+         WHERE o.object_key = candidates.object_key",
     )
     .bind(now)
+    .bind(i64::try_from(object_limit).unwrap_or(i64::MAX))
     .execute(&mut *transaction)
     .await?;
 
     let delete_before = now
         .checked_sub_signed(Duration::milliseconds(object_delete_grace_ms.max(0)))
         .unwrap_or(DateTime::<Utc>::MIN_UTC);
-    let mut deletable_objects = sqlx::query(
+    let deletable_objects = sqlx::query(
         "SELECT o.object_key
          FROM objects o
          WHERE o.unreferenced_at <= $1
            AND COALESCE(o.delete_after, o.unreferenced_at) <= $2
            AND o.committed = TRUE
+           AND ($3::TEXT IS NULL OR o.object_key > $3)
            AND NOT EXISTS (
                SELECT 1 FROM object_spans s
                WHERE s.object_key = o.object_key
-           )",
+           )
+         ORDER BY o.object_key
+         LIMIT $4",
     )
     .bind(delete_before)
     .bind(now)
+    .bind(page.start_after_object)
+    .bind(i64::try_from(object_limit.saturating_add(1)).unwrap_or(i64::MAX))
     .fetch_all(&mut *transaction)
     .await?
     .into_iter()
-    .map(|row| row.get("object_key"))
+    .map(|row| row.get::<String, _>("object_key"))
     .collect::<Vec<_>>();
-    deletable_objects.sort();
+    let next_object = (deletable_objects.len() > object_limit)
+        .then(|| deletable_objects[object_limit - 1].clone());
+    let mut deletable_objects = deletable_objects;
+    deletable_objects.truncate(object_limit);
+    let next_partition =
+        if has_more_partitions || processed_partitions.len() < selected_partition_count {
+            processed_partitions.last().cloned()
+        } else {
+            None
+        };
     transaction.commit().await?;
     Ok(RetentionResult {
         removed_spans,
         deletable_objects,
+        next_partition,
+        next_object,
     })
 }
 

@@ -1,14 +1,131 @@
-use axum::{Router, http::StatusCode, response::IntoResponse, routing::get};
+use axum::{
+    Router, http::StatusCode, response::IntoResponse, routing::get, serve::Listener as AxumListener,
+};
 use kafka_protocol::messages::ApiKey;
 use prometheus::{
     Encoder, Gauge, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge,
     IntGaugeVec, Opts, Registry, TextEncoder,
 };
+use std::future::Future;
+use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::net::TcpListener;
-use tokio::sync::watch;
+use std::task::{Context, Poll};
+use std::time::Duration;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
+use tokio::time::Sleep;
 use tracing::info;
+
+// Keep slow probes and scrapes from consuming broker-wide file descriptors.
+const ADMIN_MAX_CONNECTIONS: usize = 64;
+
+struct LimitedListener {
+    listener: TcpListener,
+    slots: Arc<Semaphore>,
+    connection_lifetime: Duration,
+}
+
+impl LimitedListener {
+    fn new(listener: TcpListener, max_connections: usize, connection_lifetime: Duration) -> Self {
+        Self {
+            listener,
+            slots: Arc::new(Semaphore::new(max_connections)),
+            connection_lifetime,
+        }
+    }
+}
+
+impl AxumListener for LimitedListener {
+    type Io = LimitedIo;
+    type Addr = SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        let slot = self
+            .slots
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("admin connection semaphore is never closed");
+        let (stream, address) = AxumListener::accept(&mut self.listener).await;
+        (
+            LimitedIo {
+                stream,
+                deadline: Box::pin(tokio::time::sleep(self.connection_lifetime)),
+                _slot: slot,
+            },
+            address,
+        )
+    }
+
+    fn local_addr(&self) -> std::io::Result<Self::Addr> {
+        self.listener.local_addr()
+    }
+}
+
+struct LimitedIo {
+    stream: TcpStream,
+    deadline: Pin<Box<Sleep>>,
+    _slot: OwnedSemaphorePermit,
+}
+
+impl LimitedIo {
+    fn deadline_elapsed(&mut self, context: &mut Context<'_>) -> bool {
+        self.deadline.as_mut().poll(context).is_ready()
+    }
+}
+
+impl AsyncRead for LimitedIo {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        if self.deadline_elapsed(context) {
+            return Poll::Ready(Err(admin_connection_timeout()));
+        }
+        Pin::new(&mut self.stream).poll_read(context, buffer)
+    }
+}
+
+impl AsyncWrite for LimitedIo {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<Result<usize, std::io::Error>> {
+        if self.deadline_elapsed(context) {
+            return Poll::Ready(Err(admin_connection_timeout()));
+        }
+        Pin::new(&mut self.stream).poll_write(context, buffer)
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        if self.deadline_elapsed(context) {
+            return Poll::Ready(Err(admin_connection_timeout()));
+        }
+        Pin::new(&mut self.stream).poll_flush(context)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        Pin::new(&mut self.stream).poll_shutdown(context)
+    }
+}
+
+fn admin_connection_timeout() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        "Admin HTTP connection lifetime exceeded",
+    )
+}
 
 #[derive(Clone)]
 pub struct Metrics {
@@ -516,6 +633,7 @@ impl Metrics {
     pub async fn serve(
         self: Arc<Self>,
         listener: TcpListener,
+        connection_lifetime: Duration,
         shutdown: watch::Receiver<bool>,
     ) -> anyhow::Result<()> {
         let metrics = self.clone();
@@ -525,9 +643,12 @@ impl Metrics {
             .route("/health/ready", get(move || ready(readiness.clone())))
             .route("/metrics", get(move || metrics_handler(metrics.clone())));
         info!(address = ?listener.local_addr()?, "admin listener started");
-        axum::serve(listener, app)
-            .with_graceful_shutdown(wait_for_shutdown(shutdown))
-            .await?;
+        axum::serve(
+            LimitedListener::new(listener, ADMIN_MAX_CONNECTIONS, connection_lifetime),
+            app,
+        )
+        .with_graceful_shutdown(wait_for_shutdown(shutdown))
+        .await?;
         Ok(())
     }
 }
@@ -576,6 +697,47 @@ async fn metrics_handler(metrics: Arc<Metrics>) -> impl IntoResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::AsyncReadExt;
+    use tokio::time::timeout;
+
+    #[tokio::test]
+    async fn limited_listener_resumes_accepting_after_a_connection_closes() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut listener = LimitedListener::new(listener, 1, Duration::from_secs(1));
+
+        let _first_client = TcpStream::connect(address).await.unwrap();
+        let (first_server, _) = AxumListener::accept(&mut listener).await;
+        let _second_client = TcpStream::connect(address).await.unwrap();
+        let mut second_accept = Box::pin(AxumListener::accept(&mut listener));
+
+        assert!(
+            timeout(Duration::from_millis(25), second_accept.as_mut())
+                .await
+                .is_err()
+        );
+
+        drop(first_server);
+        timeout(Duration::from_secs(1), second_accept)
+            .await
+            .expect("listener should resume after the connection slot is released");
+    }
+
+    #[tokio::test]
+    async fn limited_listener_expires_idle_connections() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut listener = LimitedListener::new(listener, 1, Duration::from_millis(25));
+
+        let _client = TcpStream::connect(address).await.unwrap();
+        let (mut server, _) = AxumListener::accept(&mut listener).await;
+        let error = timeout(Duration::from_secs(1), server.read_u8())
+            .await
+            .expect("idle Admin connection must expire")
+            .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    }
 
     #[test]
     fn stateless_coordinator_buffer_metrics_are_present_and_zero() {

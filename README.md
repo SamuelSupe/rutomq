@@ -18,11 +18,12 @@
 </p>
 
 > [!IMPORTANT]
-> `v0.1.0` is a public preview. It passed the documented Kafka client, Flink,
-> Kafka Streams, multi-Agent, security, and Kubernetes acceptance envelope, but
-> it does not claim complete semantic parity with every Apache Kafka deployment.
-> See the [dated compatibility result](docs/compatibility-result-2026-07-30.md)
-> and [API matrix](docs/compatibility.md) before production evaluation.
+> `v0.1.1` is the current public preview. It builds on the documented Kafka
+> client, Flink, Kafka Streams, multi-Agent, security, and Kubernetes acceptance
+> envelope from `v0.1.0`, with additional resource-boundary hardening. It does
+> not claim complete semantic parity with every Apache Kafka deployment. See the
+> [dated compatibility result](docs/compatibility-result-2026-07-30.md) and
+> [API matrix](docs/compatibility.md) before production evaluation.
 
 ## Why rutomq
 
@@ -135,8 +136,8 @@ start the service before external PostgreSQL and object storage are configured.
 ```bash
 # Debian or Ubuntu on x86-64
 curl -LO \
-  https://github.com/SamuelSupe/rutomq/releases/download/v0.1.0/rutomq_0.1.0_amd64.deb
-sudo apt install ./rutomq_0.1.0_amd64.deb
+  https://github.com/SamuelSupe/rutomq/releases/download/v0.1.1/rutomq_0.1.1_amd64.deb
+sudo apt install ./rutomq_0.1.1_amd64.deb
 ```
 
 See the [Linux package guide](docs/packaging.md) for Debian `arm64` and RPM

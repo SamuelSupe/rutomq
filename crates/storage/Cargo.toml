@@ -9,6 +9,7 @@ rust-version.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
+futures-util.workspace = true
 opendal.workspace = true
 serde.workspace = true
 serde_json.workspace = true

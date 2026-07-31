@@ -82,6 +82,7 @@ pub(super) async fn handle_as(
         )
         .await
         .unwrap()
+        .into_bytes()
 }
 
 pub(super) fn topic_rule(
